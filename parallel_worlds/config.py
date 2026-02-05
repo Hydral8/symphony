@@ -7,7 +7,7 @@ from .common import deep_merge, die
 
 DEFAULT_CONFIG: Dict[str, Any] = {
     "base_branch": "main",
-    "branch_prefix": "world",
+    "branch_prefix": "branch",
     "worlds_dir": "/tmp/parallel_worlds_worlds",
     "default_world_count": 3,
     "runner": {
@@ -15,10 +15,13 @@ DEFAULT_CONFIG: Dict[str, Any] = {
         "timeout_sec": 300,
     },
     "codex": {
-        "enabled": False,
-        "command": "",
+        "enabled": True,
+        "command": "codex exec --model gpt-5.3-codex --full-auto --skip-git-repo-check --color never",
         "timeout_sec": 900,
         "use_agents_md_skills": True,
+        "commit_mode": "series",
+        "commit_target_count": 3,
+        "commit_prefix": "pw-step",
         "automation": {
             "enabled": False,
             "name_prefix": "Parallel Worlds",
@@ -30,7 +33,8 @@ DEFAULT_CONFIG: Dict[str, Any] = {
         "preview_lines": 25,
     },
     "execution": {
-        "max_parallel_worlds": 3,
+        "max_parallel_worlds": 4,
+        "workspace_mode": "worktree",
     },
     "strategies": [
         {
@@ -110,6 +114,8 @@ def load_config(path: str) -> Dict[str, Any]:
     codex_command = codex.get("command", "")
     if not isinstance(codex_command, str):
         die("config.codex.command must be a string")
+    if not codex_command.strip():
+        codex_command = str(DEFAULT_CONFIG["codex"]["command"])
     try:
         codex_timeout = int(codex.get("timeout_sec", 900))
     except (TypeError, ValueError):
@@ -117,6 +123,18 @@ def load_config(path: str) -> Dict[str, Any]:
     if codex_timeout <= 0:
         die("config.codex.timeout_sec must be > 0")
     use_agents_md_skills = bool(codex.get("use_agents_md_skills", True))
+    commit_mode = str(codex.get("commit_mode", "series")).strip().lower() or "series"
+    if commit_mode not in {"single", "series"}:
+        die("config.codex.commit_mode must be 'single' or 'series'")
+    try:
+        commit_target_count = int(codex.get("commit_target_count", 3))
+    except (TypeError, ValueError):
+        die("config.codex.commit_target_count must be an integer")
+    if commit_target_count < 1:
+        die("config.codex.commit_target_count must be >= 1")
+    commit_prefix = str(codex.get("commit_prefix", "pw-step")).strip()
+    if not commit_prefix:
+        die("config.codex.commit_prefix must be a non-empty string")
 
     automation = codex.get("automation", {})
     if not isinstance(automation, dict):
@@ -130,6 +148,9 @@ def load_config(path: str) -> Dict[str, Any]:
     cfg["codex"]["command"] = codex_command
     cfg["codex"]["timeout_sec"] = codex_timeout
     cfg["codex"]["use_agents_md_skills"] = use_agents_md_skills
+    cfg["codex"]["commit_mode"] = commit_mode
+    cfg["codex"]["commit_target_count"] = commit_target_count
+    cfg["codex"]["commit_prefix"] = commit_prefix
     cfg["codex"]["automation"]["enabled"] = automation_enabled
     cfg["codex"]["automation"]["name_prefix"] = automation_name_prefix
 
@@ -158,12 +179,16 @@ def load_config(path: str) -> Dict[str, Any]:
     if not isinstance(execution, dict):
         die("config.execution must be an object")
     try:
-        max_parallel = int(execution.get("max_parallel_worlds", 3))
+        max_parallel = int(execution.get("max_parallel_worlds", 4))
     except (TypeError, ValueError):
         die("config.execution.max_parallel_worlds must be an integer")
     if max_parallel < 1:
         die("config.execution.max_parallel_worlds must be >= 1")
     cfg["execution"]["max_parallel_worlds"] = max_parallel
+    workspace_mode = str(execution.get("workspace_mode", "worktree")).strip().lower() or "worktree"
+    if workspace_mode not in {"branch", "worktree"}:
+        die("config.execution.workspace_mode must be 'branch' or 'worktree'")
+    cfg["execution"]["workspace_mode"] = workspace_mode
 
     strategies = cfg.get("strategies", [])
     if not isinstance(strategies, list):
