@@ -13,7 +13,7 @@
     "timeout_sec": 900
   },
   "render": {
-    "command": "",
+    "command": "python3 .parallel_worlds/render_auto.py",
     "timeout_sec": 180,
     "preview_lines": 25
   },

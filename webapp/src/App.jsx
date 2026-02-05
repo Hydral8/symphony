@@ -38,6 +38,19 @@ function fmtDuration(seconds) {
   return `${seconds}s`;
 }
 
+function compareCreatedAsc(a, b) {
+  const leftTs = Date.parse(String(a?.createdAt || ""));
+  const rightTs = Date.parse(String(b?.createdAt || ""));
+  const leftOk = Number.isFinite(leftTs);
+  const rightOk = Number.isFinite(rightTs);
+  if (leftOk && rightOk && leftTs !== rightTs) {
+    return leftTs - rightTs;
+  }
+  if (leftOk && !rightOk) return -1;
+  if (!leftOk && rightOk) return 1;
+  return String(a?.id || "").localeCompare(String(b?.id || ""));
+}
+
 async function readJson(url, options) {
   const response = await fetch(url, options);
   const payload = await response.json();
@@ -173,6 +186,7 @@ export default function App() {
 
   const worldRows = dashboard?.world_rows || [];
   const branchpoints = dashboard?.branchpoints || [];
+  const branchpointWorldMap = dashboard?.branchpoint_worlds || {};
   const branchpoint = dashboard?.branchpoint || null;
   const summary = dashboard?.summary || {};
   const activeRepo = dashboard?.repo || "";
@@ -219,6 +233,125 @@ export default function App() {
       };
     })
     .sort((a, b) => String(a.name).localeCompare(String(b.name)));
+
+  const branchpointLineage = useMemo(() => {
+    const nodes = (Array.isArray(branchpoints) ? branchpoints : [])
+      .map((bp) => ({
+        id: String(bp?.id || "").trim(),
+        sourceRef: String(bp?.source_ref || "").trim(),
+        baseBranch: String(bp?.base_branch || "").trim() || "main",
+        status: String(bp?.status || "created").trim() || "created",
+        createdAt: String(bp?.created_at || "").trim(),
+      }))
+      .filter((bp) => bp.id);
+
+    if (nodes.length === 0) {
+      return { rows: [], total: 0 };
+    }
+
+    const byId = new Map(nodes.map((node) => [node.id, node]));
+    const worldsByBranchpoint = new Map();
+    const worldBranchOwner = new Map();
+
+    for (const node of nodes) {
+      const rawWorlds = Array.isArray(branchpointWorldMap[node.id]) ? branchpointWorldMap[node.id] : [];
+      const worlds = rawWorlds
+        .map((world) => ({
+          id: String(world?.id || "").trim(),
+          name: String(world?.name || "world").trim() || "world",
+          branch: String(world?.branch || "").trim(),
+          status: String(world?.status || "ready").trim() || "ready",
+          index: Number.isInteger(world?.index) ? world.index : null,
+        }))
+        .filter((world) => world.id);
+
+      worlds.sort((left, right) => {
+        const leftIndex = Number.isInteger(left.index) ? left.index : 10_000;
+        const rightIndex = Number.isInteger(right.index) ? right.index : 10_000;
+        if (leftIndex !== rightIndex) return leftIndex - rightIndex;
+        return String(left.name).localeCompare(String(right.name));
+      });
+
+      worldsByBranchpoint.set(node.id, worlds);
+      for (const world of worlds) {
+        if (world.branch && !worldBranchOwner.has(world.branch)) {
+          worldBranchOwner.set(world.branch, node.id);
+        }
+      }
+    }
+
+    const parentById = new Map();
+    const childrenById = new Map();
+
+    for (const node of nodes) {
+      const parentId = worldBranchOwner.get(node.sourceRef);
+      if (parentId && parentId !== node.id) {
+        parentById.set(node.id, parentId);
+        if (!childrenById.has(parentId)) {
+          childrenById.set(parentId, []);
+        }
+        childrenById.get(parentId).push(node.id);
+      }
+    }
+
+    for (const children of childrenById.values()) {
+      children.sort((leftId, rightId) => compareCreatedAsc(byId.get(leftId), byId.get(rightId)));
+    }
+
+    const sourceGroups = new Map();
+    for (const node of nodes) {
+      if (parentById.has(node.id)) continue;
+      const sourceRef = node.sourceRef || node.baseBranch || "main";
+      if (!sourceGroups.has(sourceRef)) {
+        sourceGroups.set(sourceRef, []);
+      }
+      sourceGroups.get(sourceRef).push(node.id);
+    }
+
+    for (const roots of sourceGroups.values()) {
+      roots.sort((leftId, rightId) => compareCreatedAsc(byId.get(leftId), byId.get(rightId)));
+    }
+
+    const rows = [];
+    const visited = new Set();
+
+    const walk = (nodeId, depth) => {
+      if (!nodeId || visited.has(nodeId)) return;
+      visited.add(nodeId);
+      const node = byId.get(nodeId);
+      if (!node) return;
+      rows.push({
+        type: "branchpoint",
+        key: `bp:${node.id}`,
+        depth,
+        branchpoint: node,
+        worlds: worldsByBranchpoint.get(node.id) || [],
+      });
+      const children = childrenById.get(nodeId) || [];
+      for (const childId of children) {
+        walk(childId, depth + 1);
+      }
+    };
+
+    const sortedSources = Array.from(sourceGroups.keys()).sort((left, right) => String(left).localeCompare(String(right)));
+    for (const sourceRef of sortedSources) {
+      rows.push({ type: "source", key: `source:${sourceRef}`, depth: 0, sourceRef });
+      const roots = sourceGroups.get(sourceRef) || [];
+      for (const rootId of roots) {
+        walk(rootId, 1);
+      }
+    }
+
+    const orphans = nodes.filter((node) => !visited.has(node.id)).sort(compareCreatedAsc);
+    if (orphans.length > 0) {
+      rows.push({ type: "source", key: "source:unlinked", depth: 0, sourceRef: "unlinked" });
+      for (const orphan of orphans) {
+        walk(orphan.id, 1);
+      }
+    }
+
+    return { rows, total: nodes.length };
+  }, [branchpointWorldMap, branchpoints]);
 
   async function postAction(action, payload, opts = {}) {
     const { refresh = true, switchToLatest = false, resetBranchpoint = false } = opts;
@@ -1037,32 +1170,80 @@ export default function App() {
       <section className="glass dag-panel">
         <div className="dag-header">
           <h2>Branchpoint DAG</h2>
-          <p className="subtle">Live view of source and branch heads for the selected branchpoint.</p>
+          <p className="subtle">Global lineage from main/source refs plus live branch heads for the selected branchpoint.</p>
         </div>
-        <div className="dag-root-node">
-          <span className="dag-dot root" />
-          <div>
-            <p className="dag-node-title">source</p>
-            <p className="dag-node-meta mono">{branchpoint?.source_ref || "main"} ({branchpoint?.base_branch || "base"})</p>
-          </div>
+        <div className="dag-subsection">
+          <h3>All Branchpoints</h3>
+          <p className="subtle">Shows every branchpoint path starting from its source ref (for example, main).</p>
+          {branchpointLineage.rows.length === 0 ? (
+            <p className="subtle">No branchpoints found yet.</p>
+          ) : (
+            <div className="dag-tree">
+              {branchpointLineage.rows.map((row) =>
+                row.type === "source" ? (
+                  <div key={row.key} className="dag-tree-source" style={{ "--depth": row.depth }}>
+                    <span className="dag-dot root" />
+                    <div>
+                      <p className="dag-node-title">source</p>
+                      <p className="dag-node-meta mono">{row.sourceRef}</p>
+                    </div>
+                  </div>
+                ) : (
+                  <article key={row.key} className={`dag-tree-branchpoint tone-${statusTone(row.branchpoint.status)}`} style={{ "--depth": row.depth }}>
+                    <span className="dag-link" />
+                    <div className="dag-branch-head">
+                      <span className={`status ${statusTone(row.branchpoint.status)}`}>{row.branchpoint.status}</span>
+                      <strong>{row.branchpoint.id}</strong>
+                    </div>
+                    <p className="dag-node-meta mono">
+                      from {row.branchpoint.sourceRef || row.branchpoint.baseBranch || "main"} | worlds {row.worlds.length}
+                    </p>
+                    {row.worlds.length > 0 ? (
+                      <div className="dag-tree-worlds">
+                        {row.worlds.map((world) => (
+                          <span key={`dag-world-${row.branchpoint.id}-${world.id}`} className={`dag-world-pill tone-${statusTone(world.status)}`}>
+                            {world.name}
+                          </span>
+                        ))}
+                      </div>
+                    ) : null}
+                  </article>
+                ),
+              )}
+            </div>
+          )}
+          <p className="subtle">Total branchpoints: {branchpointLineage.total}</p>
         </div>
-        {dagRows.length === 0 ? (
-          <p className="subtle">No world branches yet for this branchpoint.</p>
-        ) : (
-          <div className="dag-branches">
-            {dagRows.map((item) => (
-              <article key={`dag-${item.id || item.branch}`} className={`dag-branch tone-${statusTone(item.status)}`}>
-                <span className="dag-link" />
-                <div className="dag-branch-head">
-                  <span className={`status ${statusTone(item.status)}`}>{item.status}</span>
-                  <strong>{item.name}</strong>
-                </div>
-                <p className="mono">{item.branch}</p>
-                <p className="dag-node-meta">HEAD {item.head} | commits {item.commits} | dirty {item.dirty}</p>
-              </article>
-            ))}
+
+        <div className="dag-subsection">
+          <h3>Selected Branchpoint Branch Heads</h3>
+          <div className="dag-root-node">
+            <span className="dag-dot root" />
+            <div>
+              <p className="dag-node-title">source</p>
+              <p className="dag-node-meta mono">
+                {branchpoint?.source_ref || "main"} ({branchpoint?.base_branch || "base"})
+              </p>
+            </div>
           </div>
-        )}
+          {dagRows.length === 0 ? (
+            <p className="subtle">No world branches yet for this branchpoint.</p>
+          ) : (
+            <div className="dag-branches">
+              {dagRows.map((item) => (
+                <article key={`dag-${item.id || item.branch}`} className={`dag-branch tone-${statusTone(item.status)}`}>
+                  <span className="dag-link" />
+                  <div className="dag-branch-head">
+                    <span className={`status ${statusTone(item.status)}`}>{item.status}</span>
+                    <strong>{item.name}</strong>
+                  </div>
+                  <p className="mono">{item.branch}</p>
+                  <p className="dag-node-meta">HEAD {item.head} | commits {item.commits} | dirty {item.dirty}</p>
+                </article>
+              ))}
+            </div>
+          )}
+        </div>
       </section>
 
       <section className="glass worlds-panel">
