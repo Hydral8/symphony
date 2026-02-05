@@ -124,6 +124,7 @@ def build_codex_prompt(
     lines.append("")
     if commit_mode == "series":
         lines.append(f"- Make at least {commit_target_count} incremental commits on this branch.")
+        lines.append("- Commit frequently as work progresses; aim for at least one commit per ~4 changed files.")
         lines.append(f"- Commit message format: `{commit_prefix}: <short description>`.")
         lines.append("- Commit each meaningful milestone before moving to the next.")
     else:

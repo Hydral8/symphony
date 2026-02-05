@@ -98,6 +98,15 @@ def _split_commit_chunks(paths: List[str], target_count: int) -> List[List[str]]
     return chunks
 
 
+def _series_commit_target(base_target: int, dirty_count: int, files_per_commit: int = 4) -> int:
+    base = max(0, int(base_target or 0))
+    dirty = max(0, int(dirty_count or 0))
+    ratio = 0
+    if dirty > 0:
+        ratio = (dirty + max(1, files_per_commit) - 1) // max(1, files_per_commit)
+    return max(base, ratio)
+
+
 def _autocommit_world_changes_series(
     world: Dict[str, Any],
     branchpoint_id: str,
@@ -410,11 +419,13 @@ def _run_world_pipeline(
             )
             if commit_mode == "series" and codex_result:
                 commit_count = int(codex_result.get("commit_count") or 0)
-                needed = max(0, int(commit_target_count) - commit_count)
+                dirty_count = len(_collect_commit_candidate_paths(world.get("worktree", "")))
+                target = _series_commit_target(commit_target_count, dirty_count, files_per_commit=4)
+                needed = max(0, target - commit_count)
                 if needed > 0:
                     print(
-                        f"codex {world['id']}: commit_count={commit_count}; "
-                        f"adding up to {needed} checkpoint commit(s) before runner"
+                        f"codex {world['id']}: commit_count={commit_count}, dirty={dirty_count}, "
+                        f"target={target}; adding up to {needed} checkpoint commit(s) before runner"
                     )
                     shas = _autocommit_world_changes_series(
                         world=world,
@@ -500,20 +511,27 @@ def _apply_run_result(
             world["status"] = "error"
         commit_count = int(codex_result.get("commit_count") or 0)
         if commit_mode == "series":
-            needed = max(1, int(commit_target_count) - commit_count)
-            shas = _autocommit_world_changes_series(
-                world=world,
-                branchpoint_id=bp_id,
-                prefix=commit_prefix,
-                target_count=needed,
-            )
-            if shas:
-                world["last_commit"] = shas[-1]
-                codex_result["commit_count"] = commit_count + len(shas)
-                codex_result["post_run_autocommit_count"] = len(shas)
-                codex_result["post_run_autocommit_shas"] = shas
-                print(f"committed {world['id']}: +{len(shas)} post-run checkpoint commit(s)")
-                save_codex_run(repo, bp_id, world["id"], codex_result)
+            dirty_count = len(_collect_commit_candidate_paths(world.get("worktree", "")))
+            target = _series_commit_target(commit_target_count, dirty_count, files_per_commit=4)
+            needed = max(0, target - commit_count)
+            if needed > 0:
+                print(
+                    f"codex {world['id']}: post-run commit_count={commit_count}, dirty={dirty_count}, "
+                    f"target={target}; adding up to {needed} checkpoint commit(s)"
+                )
+                shas = _autocommit_world_changes_series(
+                    world=world,
+                    branchpoint_id=bp_id,
+                    prefix=commit_prefix,
+                    target_count=needed,
+                )
+                if shas:
+                    world["last_commit"] = shas[-1]
+                    codex_result["commit_count"] = commit_count + len(shas)
+                    codex_result["post_run_autocommit_count"] = len(shas)
+                    codex_result["post_run_autocommit_shas"] = shas
+                    print(f"committed {world['id']}: +{len(shas)} post-run checkpoint commit(s)")
+                    save_codex_run(repo, bp_id, world["id"], codex_result)
 
     save_world(repo, world)
     print(
