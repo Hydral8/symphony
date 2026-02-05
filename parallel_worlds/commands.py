@@ -169,6 +169,7 @@ def _failed_render_payload(world: Dict[str, Any], branchpoint: Dict[str, Any], m
 
 
 def _run_world_pipeline(
+    repo: str,
     world: Dict[str, Any],
     branchpoint: Dict[str, Any],
     codex_enabled: bool,
@@ -182,12 +183,14 @@ def _run_world_pipeline(
     try:
         if codex_enabled:
             codex_result = run_codex_world(
+                repo=repo,
                 world=world,
                 branchpoint=branchpoint,
                 codex_cfg=codex_cfg,
                 available_skills=available_skills,
             )
         run_result = run_world(
+            repo=repo,
             world=world,
             branchpoint=branchpoint,
             runner_cmd=runner_cmd,
@@ -288,6 +291,7 @@ def run_branchpoint(
     if worker_count <= 1:
         for world in selected_worlds:
             _, codex_result, run_result = _run_world_pipeline(
+                repo=repo,
                 world=world,
                 branchpoint=branchpoint,
                 codex_enabled=codex_enabled,
@@ -304,6 +308,7 @@ def run_branchpoint(
             futures = {
                 executor.submit(
                     _run_world_pipeline,
+                    repo,
                     world,
                     branchpoint,
                     codex_enabled,

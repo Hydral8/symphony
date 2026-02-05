@@ -1,6 +1,8 @@
-import React, { useEffect, useMemo, useState } from "react";
+import React, { useEffect, useMemo, useRef, useState } from "react";
 
 const API_BASE = import.meta.env.VITE_API_BASE || "";
+const RUNS_API_PREFIX = `${API_BASE}/api/v1`;
+const TASK_STATES = ["pending", "running", "blocked", "done", "failed", "paused", "stopped"];
 
 function parseStrategies(raw) {
   return String(raw || "")
@@ -24,9 +26,136 @@ function statusTone(status) {
   return "muted";
 }
 
+function runStatusTone(status) {
+  if (status === "done" || status === "completed") return "done";
+  if (status === "running") return "running";
+  if (status === "failed") return "failed";
+  if (status === "paused") return "paused";
+  if (status === "blocked") return "blocked";
+  return "pending";
+}
+
 function fmtDuration(seconds) {
   if (seconds === null || seconds === undefined || seconds === "") return "n/a";
   return `${seconds}s`;
+}
+
+function fmtPct(value) {
+  if (value === null || value === undefined || value === "") return "0%";
+  const num = Number(value);
+  if (!Number.isFinite(num)) return "0%";
+  return `${Math.max(0, Math.min(100, Math.round(num)))}%`;
+}
+
+function unwrapData(payload) {
+  if (!payload || typeof payload !== "object") return payload;
+  if (Object.prototype.hasOwnProperty.call(payload, "data")) return payload.data;
+  return payload;
+}
+
+function normalizeTaskStatus(raw) {
+  const value = String(raw || "pending").toLowerCase();
+  if (TASK_STATES.includes(value)) return value;
+  if (value === "completed") return "done";
+  if (value === "error") return "failed";
+  if (value === "queued") return "pending";
+  return "pending";
+}
+
+function normalizeDiagram(rawDiagram) {
+  const diagram = unwrapData(rawDiagram) || {};
+  const sourceNodes = Array.isArray(diagram.nodes)
+    ? diagram.nodes
+    : Array.isArray(diagram.tasks)
+      ? diagram.tasks
+      : [];
+  const sourceEdges = Array.isArray(diagram.edges)
+    ? diagram.edges
+    : Array.isArray(diagram.dependencies)
+      ? diagram.dependencies
+      : [];
+
+  const nodes = sourceNodes
+    .map((node, index) => {
+      const taskId = String(node.task_id || node.id || node.key || `task-${index + 1}`);
+      return {
+        taskId,
+        title: String(node.title || node.name || node.label || taskId),
+        status: normalizeTaskStatus(node.status),
+        priority: node.priority,
+        objective: node.objective || node.description || "",
+        acceptanceCriteria: Array.isArray(node.acceptance_criteria) ? node.acceptance_criteria : [],
+        logs: node.logs || node.log || node.log_tail || "",
+        artifacts: Array.isArray(node.artifacts) ? node.artifacts : [],
+        raw: node,
+      };
+    })
+    .sort((a, b) => a.title.localeCompare(b.title));
+
+  const edges = sourceEdges
+    .map((edge, index) => {
+      const from = String(edge.from_task_id || edge.from || edge.source || "");
+      const to = String(edge.to_task_id || edge.to || edge.target || "");
+      return {
+        id: String(edge.id || `edge-${index + 1}`),
+        from,
+        to,
+        raw: edge,
+      };
+    })
+    .filter((edge) => edge.from && edge.to);
+
+  return { nodes, edges };
+}
+
+function normalizeArtifacts(rawArtifacts) {
+  const payload = unwrapData(rawArtifacts) || {};
+  if (Array.isArray(payload)) return payload;
+  if (Array.isArray(payload.artifacts)) return payload.artifacts;
+  if (Array.isArray(payload.items)) return payload.items;
+  return [];
+}
+
+function serializeEvent(rawText) {
+  let parsed;
+  try {
+    parsed = JSON.parse(rawText);
+  } catch {
+    parsed = { message: String(rawText || "") };
+  }
+  const payload = unwrapData(parsed) || {};
+  const event = payload.event || payload;
+  const eventType = String(event.event_type || event.type || "event");
+  const taskId = event.task_id || event.taskId || event.payload?.task_id || event.payload?.taskId || "";
+  const nextStatus = event.status || event.payload?.status || "";
+  const createdAt = event.created_at || event.timestamp || new Date().toISOString();
+  const detail = event.message || event.note || event.payload?.message || JSON.stringify(event.payload || payload || {});
+  return {
+    id: event.id || `${createdAt}-${taskId || "run"}-${eventType}`,
+    type: eventType,
+    taskId: taskId ? String(taskId) : "",
+    status: nextStatus ? normalizeTaskStatus(nextStatus) : "",
+    createdAt,
+    detail,
+    raw: payload,
+  };
+}
+
+function statusCountsFromNodes(nodes) {
+  const counts = {
+    pending: 0,
+    running: 0,
+    blocked: 0,
+    done: 0,
+    failed: 0,
+    paused: 0,
+    stopped: 0,
+  };
+  for (const node of nodes) {
+    const key = normalizeTaskStatus(node.status);
+    counts[key] = (counts[key] || 0) + 1;
+  }
+  return counts;
 }
 
 async function readJson(url, options) {
@@ -34,7 +163,7 @@ async function readJson(url, options) {
   const payload = await response.json();
   if (!response.ok || payload.ok === false) {
     const err = payload.error || payload.output || `Request failed (${response.status})`;
-    throw new Error(err);
+    throw new Error(typeof err === "string" ? err : JSON.stringify(err));
   }
   return payload;
 }
@@ -88,6 +217,24 @@ export default function App() {
     previewLines: "",
   });
 
+  const [runIdInput, setRunIdInput] = useState("");
+  const [activeRunId, setActiveRunId] = useState("");
+  const [runSummary, setRunSummary] = useState(null);
+  const [runDiagram, setRunDiagram] = useState({ nodes: [], edges: [] });
+  const [runEvents, setRunEvents] = useState([]);
+  const [runProgressLoading, setRunProgressLoading] = useState(false);
+  const [runProgressRefreshing, setRunProgressRefreshing] = useState(false);
+  const [runProgressError, setRunProgressError] = useState("");
+  const [eventStreamStatus, setEventStreamStatus] = useState("idle");
+  const [selectedTaskId, setSelectedTaskId] = useState("");
+  const [drawerTab, setDrawerTab] = useState("logs");
+  const [taskArtifactsById, setTaskArtifactsById] = useState({});
+  const [taskArtifactsLoading, setTaskArtifactsLoading] = useState(false);
+  const [taskActionBusy, setTaskActionBusy] = useState(false);
+  const [steerForm, setSteerForm] = useState({ comment: "", promptPatch: "" });
+
+  const eventSourceRef = useRef(null);
+
   async function loadDashboard(branchpoint = selectedBranchpoint, initial = false) {
     const query = branchpoint ? `?branchpoint=${encodeURIComponent(branchpoint)}` : "";
     if (initial) setLoading(true);
@@ -110,10 +257,164 @@ export default function App() {
     }
   }
 
+  function closeRunEventStream() {
+    if (eventSourceRef.current) {
+      eventSourceRef.current.close();
+      eventSourceRef.current = null;
+    }
+    setEventStreamStatus("idle");
+  }
+
+  function clearRunProgress() {
+    closeRunEventStream();
+    setActiveRunId("");
+    setRunSummary(null);
+    setRunDiagram({ nodes: [], edges: [] });
+    setRunEvents([]);
+    setSelectedTaskId("");
+    setTaskArtifactsById({});
+    setRunProgressError("");
+  }
+
+  async function loadRunProgress(runId, opts = {}) {
+    const options = { initial: false, ...opts };
+    const normalizedRunId = String(runId || "").trim();
+    if (!normalizedRunId) {
+      setRunProgressError("Run ID is required.");
+      return;
+    }
+
+    if (options.initial) setRunProgressLoading(true);
+    else setRunProgressRefreshing(true);
+    setRunProgressError("");
+
+    try {
+      const [summaryPayload, diagramPayload] = await Promise.all([
+        readJson(`${RUNS_API_PREFIX}/runs/${encodeURIComponent(normalizedRunId)}`),
+        readJson(`${RUNS_API_PREFIX}/runs/${encodeURIComponent(normalizedRunId)}/diagram`),
+      ]);
+
+      const nextSummary = unwrapData(summaryPayload);
+      const nextDiagram = normalizeDiagram(diagramPayload);
+      setActiveRunId(normalizedRunId);
+      setRunSummary(nextSummary);
+      setRunDiagram(nextDiagram);
+
+      if (nextDiagram.nodes.length > 0) {
+        const stillExists = nextDiagram.nodes.some((node) => node.taskId === selectedTaskId);
+        if (!stillExists) {
+          setSelectedTaskId(nextDiagram.nodes[0].taskId);
+        }
+      } else {
+        setSelectedTaskId("");
+      }
+    } catch (err) {
+      setRunProgressError(err.message);
+    } finally {
+      setRunProgressLoading(false);
+      setRunProgressRefreshing(false);
+    }
+  }
+
+  function connectRunEventStream(runId) {
+    const normalizedRunId = String(runId || "").trim();
+    if (!normalizedRunId) {
+      setRunProgressError("Run ID is required before connecting events.");
+      return;
+    }
+
+    closeRunEventStream();
+    setEventStreamStatus("connecting");
+    setRunProgressError("");
+
+    const source = new EventSource(`${RUNS_API_PREFIX}/runs/${encodeURIComponent(normalizedRunId)}/events`);
+    eventSourceRef.current = source;
+
+    source.onopen = () => {
+      setEventStreamStatus("live");
+    };
+
+    source.onmessage = (evt) => {
+      const row = serializeEvent(evt.data);
+      setRunEvents((prev) => [row, ...prev].slice(0, 250));
+      if (row.taskId && row.status) {
+        setRunDiagram((prev) => {
+          const nextNodes = prev.nodes.map((node) => (node.taskId === row.taskId ? { ...node, status: row.status } : node));
+          return { ...prev, nodes: nextNodes };
+        });
+      }
+    };
+
+    source.onerror = () => {
+      setEventStreamStatus("error");
+    };
+  }
+
+  async function loadTaskArtifacts(taskId, force = false) {
+    const normalizedTaskId = String(taskId || "").trim();
+    if (!normalizedTaskId || !activeRunId) return;
+    if (!force && taskArtifactsById[normalizedTaskId]) return;
+
+    setTaskArtifactsLoading(true);
+    try {
+      const payload = await readJson(`${RUNS_API_PREFIX}/tasks/${encodeURIComponent(normalizedTaskId)}/artifacts`);
+      const artifacts = normalizeArtifacts(payload);
+      setTaskArtifactsById((prev) => ({ ...prev, [normalizedTaskId]: artifacts }));
+    } catch (err) {
+      setTaskArtifactsById((prev) => ({
+        ...prev,
+        [normalizedTaskId]: [
+          {
+            id: `err-${Date.now()}`,
+            kind: "error",
+            path: "",
+            message: err.message,
+          },
+        ],
+      }));
+    } finally {
+      setTaskArtifactsLoading(false);
+    }
+  }
+
+  async function taskControlAction(taskId, action, body = {}) {
+    if (!activeRunId) {
+      setRunProgressError("Load a run before issuing task actions.");
+      return;
+    }
+
+    setTaskActionBusy(true);
+    setRunProgressError("");
+    try {
+      await readJson(`${RUNS_API_PREFIX}/tasks/${encodeURIComponent(taskId)}/${action}`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      });
+      await loadRunProgress(activeRunId, { initial: false });
+      if (action === "steer") {
+        setSteerForm({ comment: "", promptPatch: "" });
+      }
+    } catch (err) {
+      setRunProgressError(err.message);
+    } finally {
+      setTaskActionBusy(false);
+    }
+  }
+
   useEffect(() => {
     loadDashboard("", true);
+    return () => {
+      closeRunEventStream();
+    };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  useEffect(() => {
+    if (!selectedTaskId) return;
+    loadTaskArtifacts(selectedTaskId, false);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selectedTaskId, activeRunId]);
 
   const worldRows = dashboard?.world_rows || [];
   const branchpoints = dashboard?.branchpoints || [];
@@ -123,6 +424,49 @@ export default function App() {
     if (!branchpoint) return "none";
     return `${branchpoint.id} (${branchpoint.status || "created"})`;
   }, [branchpoint]);
+
+  const selectedTask = useMemo(() => runDiagram.nodes.find((node) => node.taskId === selectedTaskId) || null, [runDiagram.nodes, selectedTaskId]);
+
+  const runStatusCounts = useMemo(() => statusCountsFromNodes(runDiagram.nodes), [runDiagram.nodes]);
+
+  const completionPct = useMemo(() => {
+    if (runSummary?.completion_pct !== undefined && runSummary?.completion_pct !== null) {
+      return fmtPct(runSummary.completion_pct);
+    }
+    const total = runDiagram.nodes.length;
+    if (!total) return "0%";
+    const terminal = runStatusCounts.done + runStatusCounts.failed + runStatusCounts.stopped;
+    return fmtPct((terminal / total) * 100);
+  }, [runSummary, runDiagram.nodes.length, runStatusCounts]);
+
+  const activeAgents = useMemo(() => {
+    if (runSummary?.active_agents !== undefined && runSummary?.active_agents !== null) {
+      return String(runSummary.active_agents);
+    }
+    if (runSummary?.counts?.running !== undefined && runSummary?.counts?.running !== null) {
+      return String(runSummary.counts.running);
+    }
+    return String(runStatusCounts.running || 0);
+  }, [runSummary, runStatusCounts.running]);
+
+  const taskEvents = useMemo(() => {
+    if (!selectedTaskId) return [];
+    return runEvents.filter((evt) => evt.taskId === selectedTaskId);
+  }, [runEvents, selectedTaskId]);
+
+  const logText = useMemo(() => {
+    if (!selectedTask) return "Select a task to inspect logs.";
+    if (selectedTask.logs) return String(selectedTask.logs);
+    if (taskEvents.length === 0) return "No logs captured for this task yet.";
+    return taskEvents
+      .map((evt) => {
+        const stamp = evt.createdAt ? new Date(evt.createdAt).toLocaleTimeString() : "--:--:--";
+        return `[${stamp}] ${evt.type}: ${evt.detail}`;
+      })
+      .join("\n");
+  }, [selectedTask, taskEvents]);
+
+  const selectedArtifacts = selectedTaskId ? taskArtifactsById[selectedTaskId] || [] : [];
 
   async function postAction(action, payload, opts = {}) {
     const { refresh = true, switchToLatest = false } = opts;
@@ -246,6 +590,225 @@ export default function App() {
           <pre>{actionOutput}</pre>
         </section>
       ) : null}
+
+      <section className="glass progress-shell">
+        <div className="progress-head">
+          <div>
+            <p className="eyebrow">Symphony Operator View</p>
+            <h2>Run Progress</h2>
+            <p className="subtle">Monitor DAG execution and steer active tasks from one panel.</p>
+          </div>
+          <div className="progress-actions">
+            <input
+              value={runIdInput}
+              onChange={(e) => setRunIdInput(e.target.value)}
+              placeholder="run-id"
+              aria-label="Run ID"
+            />
+            <button className="btn" disabled={runProgressLoading || !runIdInput.trim()} onClick={() => loadRunProgress(runIdInput.trim(), { initial: true })}>
+              {runProgressLoading ? "Loading..." : "Load Run"}
+            </button>
+            <button className="btn ghost" disabled={!activeRunId || runProgressRefreshing} onClick={() => loadRunProgress(activeRunId, { initial: false })}>
+              {runProgressRefreshing ? "Refreshing..." : "Refresh Run"}
+            </button>
+            {eventStreamStatus === "live" || eventStreamStatus === "connecting" ? (
+              <button className="btn ghost" onClick={closeRunEventStream}>
+                Disconnect Events
+              </button>
+            ) : (
+              <button className="btn ghost" disabled={!activeRunId} onClick={() => connectRunEventStream(activeRunId)}>
+                Connect Events
+              </button>
+            )}
+            <button className="btn ghost" disabled={!activeRunId} onClick={clearRunProgress}>
+              Clear
+            </button>
+          </div>
+        </div>
+
+        {runProgressError ? (
+          <div className="notice error progress-error">
+            <strong>Run API error:</strong> {runProgressError}
+          </div>
+        ) : null}
+
+        <div className="progress-kpis">
+          <article className="kpi-card">
+            <p>Run ID</p>
+            <strong>{activeRunId || "none"}</strong>
+          </article>
+          <article className="kpi-card">
+            <p>Status</p>
+            <strong className={`run-pill ${runStatusTone(runSummary?.status)}`}>{String(runSummary?.status || "pending")}</strong>
+          </article>
+          <article className="kpi-card">
+            <p>Active agents</p>
+            <strong>{activeAgents}</strong>
+          </article>
+          <article className="kpi-card">
+            <p>Completion</p>
+            <strong>{completionPct}</strong>
+          </article>
+          <article className="kpi-card">
+            <p>Total tasks</p>
+            <strong>{runDiagram.nodes.length}</strong>
+          </article>
+        </div>
+
+        <div className="status-counter-row">
+          {TASK_STATES.map((state) => (
+            <span key={state} className={`status-chip ${state}`}>
+              {state}: {runStatusCounts[state] || 0}
+            </span>
+          ))}
+        </div>
+
+        <div className="progress-layout">
+          <section className="diagram-panel">
+            <header>
+              <h3>DAG Tasks</h3>
+              <p className="subtle">{runDiagram.edges.length} dependency edges</p>
+            </header>
+            {runDiagram.nodes.length === 0 ? (
+              <p className="subtle">Load a run to render task nodes.</p>
+            ) : (
+              <div className="dag-grid">
+                {runDiagram.nodes.map((node) => (
+                  <button
+                    key={node.taskId}
+                    className={`dag-node ${node.status} ${selectedTaskId === node.taskId ? "selected" : ""}`}
+                    onClick={() => {
+                      setSelectedTaskId(node.taskId);
+                      setDrawerTab("logs");
+                    }}
+                  >
+                    <span className="dag-node-title">{node.title}</span>
+                    <span className={`dag-node-status ${node.status}`}>{node.status}</span>
+                    <span className="dag-node-id mono">{node.taskId}</span>
+                  </button>
+                ))}
+              </div>
+            )}
+
+            <header className="event-head">
+              <h3>Live Events</h3>
+              <p className="subtle">
+                Stream: <code>{eventStreamStatus}</code>
+              </p>
+            </header>
+            <div className="event-feed">
+              {runEvents.length === 0 ? (
+                <p className="subtle">No events yet. Connect stream or refresh run.</p>
+              ) : (
+                runEvents.map((event) => (
+                  <article key={event.id} className="event-row">
+                    <div className="event-row-head">
+                      <strong>{event.type}</strong>
+                      <span className="subtle">{event.taskId || "run"}</span>
+                      <span className={`status-chip tiny ${event.status || "pending"}`}>{event.status || "info"}</span>
+                    </div>
+                    <p className="subtle">{event.detail}</p>
+                  </article>
+                ))
+              )}
+            </div>
+          </section>
+
+          <aside className="task-drawer">
+            <header>
+              <h3>Task Details</h3>
+              <p className="subtle mono">{selectedTaskId || "none"}</p>
+            </header>
+
+            {selectedTask ? (
+              <>
+                <article className="task-meta-card">
+                  <h4>{selectedTask.title}</h4>
+                  <p className="subtle">{selectedTask.objective || "No objective provided."}</p>
+                  <div className="status-counter-row compact">
+                    <span className={`status-chip ${selectedTask.status}`}>{selectedTask.status}</span>
+                    <span className="status-chip pending">priority: {selectedTask.priority ?? "n/a"}</span>
+                  </div>
+                </article>
+
+                <div className="button-row">
+                  <button className="btn small" disabled={taskActionBusy} onClick={() => taskControlAction(selectedTask.taskId, "pause")}>
+                    Pause
+                  </button>
+                  <button className="btn small" disabled={taskActionBusy} onClick={() => taskControlAction(selectedTask.taskId, "resume")}>
+                    Resume
+                  </button>
+                  <button className="btn small accent" disabled={taskActionBusy} onClick={() => taskControlAction(selectedTask.taskId, "stop")}>
+                    Stop
+                  </button>
+                </div>
+
+                <label>
+                  Steering comment
+                  <textarea
+                    value={steerForm.comment}
+                    onChange={(e) => setSteerForm((prev) => ({ ...prev, comment: e.target.value }))}
+                    placeholder="Focus on deterministic retry behavior and include regression test coverage."
+                  />
+                </label>
+                <label>
+                  Prompt patch (optional)
+                  <textarea
+                    value={steerForm.promptPatch}
+                    onChange={(e) => setSteerForm((prev) => ({ ...prev, promptPatch: e.target.value }))}
+                    placeholder="Append: prioritize minimal diff and preserve public API compatibility."
+                  />
+                </label>
+                <button
+                  className="btn primary"
+                  disabled={taskActionBusy || !steerForm.comment.trim()}
+                  onClick={() =>
+                    taskControlAction(selectedTask.taskId, "steer", {
+                      comment: steerForm.comment.trim(),
+                      prompt_patch: steerForm.promptPatch.trim(),
+                    })
+                  }
+                >
+                  {taskActionBusy ? "Submitting..." : "Send Steering"}
+                </button>
+
+                <div className="drawer-tabs">
+                  <button className={`tab-btn ${drawerTab === "logs" ? "active" : ""}`} onClick={() => setDrawerTab("logs")}>Logs</button>
+                  <button className={`tab-btn ${drawerTab === "artifacts" ? "active" : ""}`} onClick={() => setDrawerTab("artifacts")}>Artifacts</button>
+                </div>
+
+                {drawerTab === "logs" ? (
+                  <pre className="drawer-pre">{logText}</pre>
+                ) : (
+                  <div className="artifact-list">
+                    <div className="artifact-actions">
+                      <button className="btn small" disabled={taskArtifactsLoading} onClick={() => loadTaskArtifacts(selectedTask.taskId, true)}>
+                        {taskArtifactsLoading ? "Refreshing..." : "Refresh Artifacts"}
+                      </button>
+                    </div>
+                    {selectedArtifacts.length === 0 ? (
+                      <p className="subtle">No artifacts yet.</p>
+                    ) : (
+                      selectedArtifacts.map((item, idx) => (
+                        <article key={item.id || `artifact-${idx}`} className="artifact-row">
+                          <div className="artifact-top">
+                            <strong>{item.kind || "artifact"}</strong>
+                            <span className="subtle mono">{item.path || item.name || "inline"}</span>
+                          </div>
+                          {item.message ? <p className="subtle">{item.message}</p> : null}
+                          {item.content ? <pre className="drawer-pre">{String(item.content)}</pre> : null}
+                        </article>
+                      ))
+                    )}
+                  </div>
+                )}
+              </>
+            ) : (
+              <p className="subtle">Select a DAG node to inspect logs, artifacts, and controls.</p>
+            )}
+          </aside>
+        </div>
+      </section>
 
       <section className="layout">
         <article className="glass panel">
