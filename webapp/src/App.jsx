@@ -16,6 +16,14 @@ function asInt(value) {
   return Number.isFinite(parsed) ? parsed : null;
 }
 
+function parentPath(rawPath) {
+  const normalized = String(rawPath || "").trim().replace(/[\\/]+$/, "");
+  if (!normalized) return "";
+  const slash = Math.max(normalized.lastIndexOf("/"), normalized.lastIndexOf("\\"));
+  if (slash <= 0) return normalized;
+  return normalized.slice(0, slash);
+}
+
 function statusTone(status) {
   if (status === "pass") return "pass";
   if (status === "fail" || status === "error") return "fail";
@@ -39,12 +47,19 @@ async function readJson(url, options) {
   return payload;
 }
 
+function sleep(ms) {
+  return new Promise((resolve) => {
+    window.setTimeout(resolve, ms);
+  });
+}
+
 export default function App() {
   const [dashboard, setDashboard] = useState(null);
   const [selectedBranchpoint, setSelectedBranchpoint] = useState("");
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [busy, setBusy] = useState(false);
+  const [pickingPath, setPickingPath] = useState(false);
   const [error, setError] = useState("");
   const [actionOutput, setActionOutput] = useState("");
   const [artifactName, setArtifactName] = useState("report.md");
@@ -57,9 +72,24 @@ export default function App() {
     loading: false,
   });
 
+  const [projectForm, setProjectForm] = useState({
+    path: "",
+    name: "",
+    basePath: "",
+    baseBranch: "main",
+    configName: "parallel_worlds.json",
+  });
+
+  const [switchForm, setSwitchForm] = useState({
+    path: "",
+    name: "",
+    baseBranch: "main",
+    configName: "parallel_worlds.json",
+  });
+
   const [autopilot, setAutopilot] = useState({
     prompt: "",
-    count: "3",
+    maxCount: "4",
     fromRef: "",
     strategies: "",
     run: true,
@@ -70,7 +100,7 @@ export default function App() {
 
   const [kickoff, setKickoff] = useState({
     intent: "",
-    count: "3",
+    maxCount: "4",
     fromRef: "",
     strategies: "",
   });
@@ -118,25 +148,75 @@ export default function App() {
   const worldRows = dashboard?.world_rows || [];
   const branchpoints = dashboard?.branchpoints || [];
   const branchpoint = dashboard?.branchpoint || null;
+  const summary = dashboard?.summary || {};
+  const activeRepo = dashboard?.repo || "";
+  const activeConfig = dashboard?.config || "";
+
+  useEffect(() => {
+    let fallback = parentPath(activeRepo);
+    if (!fallback) return;
+
+    if (fallback === "/Users/sbae703") {
+      fallback = "/Users/sbae703/codex_projects";
+    }
+
+    setProjectForm((s) => (s.basePath.trim() ? s : { ...s, basePath: fallback }));
+  }, [activeRepo]);
 
   const branchpointLabel = useMemo(() => {
     if (!branchpoint) return "none";
     return `${branchpoint.id} (${branchpoint.status || "created"})`;
   }, [branchpoint]);
 
+  const openBranches = Number.isInteger(summary.open_branches_current)
+    ? summary.open_branches_current
+    : worldRows.length;
+
+  const awaitingMerge = Number.isInteger(summary.awaiting_merge_current)
+    ? summary.awaiting_merge_current
+    : worldRows.filter((row) => row.world.status === "pass" || row.world.id === branchpoint?.selected_world_id).length;
+
+  const effectiveProjectBasePath = projectForm.basePath.trim() || parentPath(activeRepo);
+  const canCreateProject = Boolean(projectForm.path.trim() || projectForm.name.trim());
+
   async function postAction(action, payload, opts = {}) {
-    const { refresh = true, switchToLatest = false } = opts;
+    const { refresh = true, switchToLatest = false, resetBranchpoint = false } = opts;
     setBusy(true);
     setError("");
     setActionOutput("");
     try {
-      const result = await readJson(`${API_BASE}/api/action/${action}`, {
+      let result = await readJson(`${API_BASE}/api/action/${action}`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(payload || {}),
       });
+
+      if (result.job_id) {
+        const jobId = String(result.job_id);
+        setActionOutput(`Running ${action}...`);
+        while (true) {
+          const status = await readJson(`${API_BASE}/api/action_status?job=${encodeURIComponent(jobId)}`);
+          const liveText = status.log || status?.result?.output || "";
+          if (liveText) {
+            setActionOutput(liveText);
+          }
+          if (status.status === "completed" || status.status === "failed") {
+            result = status.result || {};
+            break;
+          }
+          await sleep(700);
+        }
+      }
+
       setActionOutput(result.output || "Action completed.");
-      if (switchToLatest && result.latest_branchpoint) {
+      if (result.ok === false) {
+        throw new Error(result.error || result.output || "Action failed");
+      }
+
+      if (resetBranchpoint) {
+        setSelectedBranchpoint("");
+        await loadDashboard("", false);
+      } else if (switchToLatest && result.latest_branchpoint) {
         setSelectedBranchpoint(result.latest_branchpoint);
         await loadDashboard(result.latest_branchpoint, false);
       } else if (refresh) {
@@ -158,6 +238,46 @@ export default function App() {
       setArtifactText(payload.text || "");
     } catch (err) {
       setError(err.message);
+    }
+  }
+
+  async function chooseFolder(target) {
+    const isNewProjectPath = target === "new";
+    const isNewBasePath = target === "new-base";
+    const defaultPath = isNewProjectPath
+      ? projectForm.path
+      : isNewBasePath
+        ? projectForm.basePath
+        : switchForm.path;
+    const prompt = isNewProjectPath
+      ? "Choose where to create the new project"
+      : isNewBasePath
+        ? "Choose base path for new projects"
+        : "Choose an existing project repository";
+
+    setPickingPath(true);
+    setError("");
+    try {
+      const payload = await readJson(`${API_BASE}/api/action/pick_path`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          prompt,
+          default_path: defaultPath.trim() || null,
+        }),
+      });
+      if (payload.canceled || !payload.path) return;
+      if (isNewProjectPath) {
+        setProjectForm((s) => ({ ...s, path: payload.path }));
+      } else if (isNewBasePath) {
+        setProjectForm((s) => ({ ...s, basePath: payload.path }));
+      } else {
+        setSwitchForm((s) => ({ ...s, path: payload.path }));
+      }
+    } catch (err) {
+      setError(err.message);
+    } finally {
+      setPickingPath(false);
     }
   }
 
@@ -195,7 +315,7 @@ export default function App() {
         branchpoint: selectedBranchpoint || "",
         world: world.id,
         intent: intent.trim(),
-        count: asInt(autopilot.count),
+        max_count: asInt(autopilot.maxCount),
       },
       { switchToLatest: true },
     );
@@ -219,19 +339,31 @@ export default function App() {
           <p className="eyebrow">Git Pathway Control</p>
           <h1>Parallel Worlds</h1>
           <p className="subtle">
+            Repo: <code>{activeRepo || "n/a"}</code>
+          </p>
+          <p className="subtle">
+            Config: <code>{activeConfig || "n/a"}</code>
+          </p>
+          <p className="subtle">
             Branchpoint: <code>{branchpointLabel}</code>
           </p>
+          <div className="hero-stats">
+            <p className="hero-stat">
+              <span>Open branches</span>
+              <strong>{openBranches}</strong>
+            </p>
+            <p className="hero-stat">
+              <span>Awaiting merge (feature complete)</span>
+              <strong>{awaitingMerge}</strong>
+            </p>
+          </div>
         </div>
         <div className="hero-actions">
           <button className="btn ghost" disabled={refreshing || busy} onClick={() => loadDashboard(selectedBranchpoint, false)}>
             {refreshing ? "Refreshing..." : "Refresh"}
           </button>
-          <button className="btn ghost" onClick={() => openArtifact("report.md")}>
-            Open report.md
-          </button>
-          <button className="btn ghost" onClick={() => openArtifact("play.md")}>
-            Open play.md
-          </button>
+          <button className="btn ghost" onClick={() => openArtifact("report.md")}>Open report.md</button>
+          <button className="btn ghost" onClick={() => openArtifact("play.md")}>Open play.md</button>
         </div>
       </header>
 
@@ -247,6 +379,165 @@ export default function App() {
         </section>
       ) : null}
 
+      <section className="glass panel">
+        <h2>Project Setup</h2>
+        <p className="subtle">Create a brand-new git repository project or switch this dashboard to an existing one.</p>
+        <div className="layout">
+          <article>
+            <h3>New Project</h3>
+            <label>
+              Project path (optional)
+              <div className="field-with-action">
+                <input
+                  value={projectForm.path}
+                  onChange={(e) => setProjectForm((s) => ({ ...s, path: e.target.value }))}
+                  placeholder="/Users/you/dev/new-app (leave empty to use base path + name)"
+                />
+                <button className="btn ghost small" type="button" disabled={busy || pickingPath} onClick={() => chooseFolder("new")}>
+                  {pickingPath ? "Opening..." : "Choose in Finder"}
+                </button>
+              </div>
+            </label>
+            <label>
+              Base path (used when project path is empty)
+              <div className="field-with-action">
+                <input
+                  value={projectForm.basePath}
+                  onChange={(e) => setProjectForm((s) => ({ ...s, basePath: e.target.value }))}
+                  placeholder={parentPath(activeRepo) || "/Users/you/dev"}
+                />
+                <button className="btn ghost small" type="button" disabled={busy || pickingPath} onClick={() => chooseFolder("new-base")}>
+                  {pickingPath ? "Opening..." : "Choose in Finder"}
+                </button>
+              </div>
+            </label>
+            <div className="grid two">
+              <label>
+                Project name
+                <input
+                  value={projectForm.name}
+                  onChange={(e) => setProjectForm((s) => ({ ...s, name: e.target.value }))}
+                  placeholder="New App"
+                />
+              </label>
+              <label>
+                Base branch
+                <input
+                  value={projectForm.baseBranch}
+                  onChange={(e) => setProjectForm((s) => ({ ...s, baseBranch: e.target.value }))}
+                  placeholder="main"
+                />
+              </label>
+            </div>
+            <label>
+              Config filename
+              <input
+                value={projectForm.configName}
+                onChange={(e) => setProjectForm((s) => ({ ...s, configName: e.target.value }))}
+                placeholder="parallel_worlds.json"
+              />
+            </label>
+            <button
+              className="btn"
+              disabled={busy || pickingPath || !canCreateProject}
+              onClick={() =>
+                postAction(
+                  "new_project",
+                  {
+                    path: projectForm.path.trim() || null,
+                    name: projectForm.name.trim() || null,
+                    base_path: effectiveProjectBasePath || null,
+                    base_branch: projectForm.baseBranch.trim() || "main",
+                    config_name: projectForm.configName.trim() || "parallel_worlds.json",
+                  },
+                  { resetBranchpoint: true },
+                )
+              }
+            >
+              Create Project
+            </button>
+          </article>
+          <article>
+            <h3>Switch Project</h3>
+            <label>
+              Existing repo path
+              <div className="field-with-action">
+                <input
+                  value={switchForm.path}
+                  onChange={(e) => setSwitchForm((s) => ({ ...s, path: e.target.value }))}
+                  placeholder="/Users/you/dev/existing-repo"
+                />
+                <button className="btn ghost small" type="button" disabled={busy || pickingPath} onClick={() => chooseFolder("switch")}>
+                  {pickingPath ? "Opening..." : "Choose in Finder"}
+                </button>
+              </div>
+            </label>
+            <label>
+              Config filename
+              <input
+                value={switchForm.configName}
+                onChange={(e) => setSwitchForm((s) => ({ ...s, configName: e.target.value }))}
+                placeholder="parallel_worlds.json"
+              />
+            </label>
+            <div className="grid two">
+              <label>
+                If creating: project name
+                <input
+                  value={switchForm.name}
+                  onChange={(e) => setSwitchForm((s) => ({ ...s, name: e.target.value }))}
+                  placeholder="New App"
+                />
+              </label>
+              <label>
+                If creating: base branch
+                <input
+                  value={switchForm.baseBranch}
+                  onChange={(e) => setSwitchForm((s) => ({ ...s, baseBranch: e.target.value }))}
+                  placeholder="main"
+                />
+              </label>
+            </div>
+            <div className="button-row">
+              <button
+                className="btn"
+                disabled={busy || pickingPath || !switchForm.path.trim()}
+                onClick={() =>
+                  postAction(
+                    "switch_project",
+                    {
+                      path: switchForm.path.trim(),
+                      config_name: switchForm.configName.trim() || "parallel_worlds.json",
+                    },
+                    { resetBranchpoint: true },
+                  )
+                }
+              >
+                Switch Existing
+              </button>
+              <button
+                className="btn primary"
+                disabled={busy || pickingPath || !switchForm.path.trim()}
+                onClick={() =>
+                  postAction(
+                    "open_or_create_project",
+                    {
+                      path: switchForm.path.trim(),
+                      name: switchForm.name.trim() || null,
+                      base_branch: switchForm.baseBranch.trim() || "main",
+                      config_name: switchForm.configName.trim() || "parallel_worlds.json",
+                    },
+                    { resetBranchpoint: true },
+                  )
+                }
+              >
+                Open or Create
+              </button>
+            </div>
+          </article>
+        </div>
+      </section>
+
       <section className="layout">
         <article className="glass panel">
           <h2>Prompt Agent</h2>
@@ -261,11 +552,11 @@ export default function App() {
           </label>
           <div className="grid two">
             <label>
-              World count
+              Max world count (model auto-select)
               <input
-                value={autopilot.count}
-                onChange={(e) => setAutopilot((s) => ({ ...s, count: e.target.value }))}
-                placeholder="3"
+                value={autopilot.maxCount}
+                onChange={(e) => setAutopilot((s) => ({ ...s, maxCount: e.target.value }))}
+                placeholder="4"
               />
             </label>
             <label>
@@ -277,6 +568,7 @@ export default function App() {
               />
             </label>
           </div>
+          <p className="subtle">The model chooses branch count from 1..max.</p>
           <label>
             Strategies (optional, one per line: <code>name::notes</code>)
             <textarea
@@ -327,7 +619,7 @@ export default function App() {
                 "autopilot",
                 {
                   prompt: autopilot.prompt.trim(),
-                  count: asInt(autopilot.count),
+                  max_count: asInt(autopilot.maxCount),
                   from_ref: autopilot.fromRef.trim() || null,
                   strategies: parseStrategies(autopilot.strategies),
                   run: autopilot.run,
@@ -368,8 +660,8 @@ export default function App() {
           </label>
           <div className="grid two">
             <label>
-              Count
-              <input value={kickoff.count} onChange={(e) => setKickoff((s) => ({ ...s, count: e.target.value }))} />
+              Max world count (model auto-select)
+              <input value={kickoff.maxCount} onChange={(e) => setKickoff((s) => ({ ...s, maxCount: e.target.value }))} placeholder="4" />
             </label>
             <label>
               From ref
@@ -380,6 +672,7 @@ export default function App() {
               />
             </label>
           </div>
+          <p className="subtle">The model chooses branch count from 1..max.</p>
           <label>
             Strategies (optional)
             <textarea
@@ -396,7 +689,7 @@ export default function App() {
                 "kickoff",
                 {
                   intent: kickoff.intent.trim(),
-                  count: asInt(kickoff.count),
+                  max_count: asInt(kickoff.maxCount),
                   from_ref: kickoff.fromRef.trim() || null,
                   strategies: parseStrategies(kickoff.strategies),
                 },

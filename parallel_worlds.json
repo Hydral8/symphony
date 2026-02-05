@@ -8,14 +8,9 @@
     "timeout_sec": 300
   },
   "codex": {
-    "enabled": false,
-    "command": "",
-    "timeout_sec": 900,
-    "use_agents_md_skills": true,
-    "automation": {
-      "enabled": false,
-      "name_prefix": "Parallel Worlds"
-    }
+    "enabled": true,
+    "command": "codex exec --model gpt-5.3-codex --full-auto --skip-git-repo-check --color never",
+    "timeout_sec": 900
   },
   "render": {
     "command": "",

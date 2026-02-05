@@ -2,7 +2,7 @@ import os
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Any, Dict, List, Optional, Tuple
 
-from .common import die, ensure_git_repo, git, now_utc, relative_to_repo, slugify, worktree_is_clean
+from .common import die, ensure_git_repo, git, now_utc, read_json, relative_to_repo, slugify, worktree_is_clean, write_json
 from .config import load_config, write_default_config
 from .execution import load_agents_skills, run_codex_world, run_render_world, run_world, tail_file
 from .state import (
@@ -28,6 +28,90 @@ from .state import (
 )
 from .strategy import choose_strategies, make_branchpoint_id
 from .worlds import add_worktree, ensure_base_branch, ensure_worlds_dir, matches_world_filter, resolve_start_ref, write_world_notes
+
+
+def create_project(
+    project_path: str,
+    project_name: Optional[str],
+    base_branch: str,
+    config_name: str,
+) -> Tuple[str, str]:
+    path = os.path.abspath(project_path)
+    if os.path.exists(path) and not os.path.isdir(path):
+        die(f"project path exists and is not a directory: {path}")
+
+    os.makedirs(path, exist_ok=True)
+    entries = [name for name in os.listdir(path) if name not in {".DS_Store"}]
+    if entries:
+        die(f"project directory must be empty: {path}")
+
+    base = (base_branch or "main").strip() or "main"
+    init = git(["init", "-b", base], cwd=path, check=False)
+    if init.returncode != 0:
+        git(["init"], cwd=path, check=True)
+        git(["checkout", "-b", base], cwd=path, check=True)
+
+    title = (project_name or os.path.basename(path)).strip() or "Parallel Worlds Project"
+    readme_path = os.path.join(path, "README.md")
+    with open(readme_path, "w", encoding="utf-8") as f:
+        f.write(f"# {title}\n\nBootstrapped with Parallel Worlds.\n")
+
+    git(["add", "README.md"], cwd=path, check=True)
+    git(
+        [
+            "-c",
+            "user.name=Parallel Worlds",
+            "-c",
+            "user.email=parallel-worlds@local",
+            "commit",
+            "-m",
+            "Initial commit",
+        ],
+        cwd=path,
+        check=True,
+    )
+
+    cfg_name = os.path.basename((config_name or "parallel_worlds.json").strip() or "parallel_worlds.json")
+    cfg_path = os.path.join(path, cfg_name)
+    if not os.path.exists(cfg_path):
+        write_default_config(cfg_path, force=False)
+
+    cfg_payload = read_json(cfg_path)
+    if cfg_payload.get("base_branch") != base:
+        cfg_payload["base_branch"] = base
+        write_json(cfg_path, cfg_payload)
+
+    ensure_metadata_dirs(path)
+
+    print(f"created project: {path}")
+    print(f"base branch: {base}")
+    print(f"config: {cfg_path}")
+    return path, cfg_path
+
+
+def switch_project(project_path: str, config_name: str) -> Tuple[str, str]:
+    probe = os.path.abspath(project_path)
+    if not os.path.isdir(probe):
+        die(f"project path not found: {probe}")
+
+    root_result = git(["rev-parse", "--show-toplevel"], cwd=probe, check=False)
+    if root_result.returncode != 0:
+        die(f"not a git repository: {probe}")
+
+    repo = root_result.stdout.strip()
+    if not repo:
+        die(f"unable to resolve git root: {probe}")
+
+    cfg_name = os.path.basename((config_name or "parallel_worlds.json").strip() or "parallel_worlds.json")
+    cfg_path = os.path.join(repo, cfg_name)
+    if not os.path.exists(cfg_path):
+        write_default_config(cfg_path, force=False)
+
+    ensure_metadata_dirs(repo)
+
+    print(f"switched project: {repo}")
+    print(f"config: {cfg_path}")
+    return repo, cfg_path
 
 
 def resolve_worlds_for_branchpoint(repo: str, branchpoint: Dict[str, Any], world_filters: Optional[List[str]]) -> List[Dict[str, Any]]:

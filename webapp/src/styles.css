@@ -101,6 +101,36 @@ h3 {
   gap: 10px;
 }
 
+.hero-stats {
+  margin-top: 12px;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.hero-stat {
+  margin: 0;
+  display: grid;
+  gap: 2px;
+  min-width: 180px;
+  padding: 8px 10px;
+  border-radius: 12px;
+  background: color-mix(in srgb, #ffffff 78%, #d9f1ec);
+  border: 1px solid color-mix(in srgb, var(--line) 72%, #ffffff);
+}
+
+.hero-stat span {
+  font-size: 0.74rem;
+  color: var(--ink-soft);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+
+.hero-stat strong {
+  font-size: 1.2rem;
+  line-height: 1.05;
+}
+
 .layout {
   display: grid;
   gap: 16px;
@@ -135,6 +165,16 @@ label {
   gap: 6px;
   font-size: 0.88rem;
   margin-top: 11px;
+}
+
+.field-with-action {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+
+.field-with-action input {
+  flex: 1;
 }
 
 input,

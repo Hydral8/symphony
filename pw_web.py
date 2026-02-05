@@ -6,13 +6,116 @@ import io
 import json
 import mimetypes
 import os
+import re
+import subprocess
+import sys
+import tempfile
+import threading
 import traceback
-from contextlib import redirect_stderr, redirect_stdout
+import uuid
+from datetime import datetime
+from contextlib import contextmanager, redirect_stderr, redirect_stdout
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Tuple
 from urllib.parse import parse_qs, urlparse
 
 import pw
+from parallel_worlds.common import branch_exists, git
+
+
+_ACTION_LOCK = threading.RLock()
+_ACTION_JOBS_LOCK = threading.RLock()
+_ACTION_JOBS: Dict[str, Dict[str, Any]] = {}
+_MAX_ACTION_JOBS = 100
+_MAX_ACTION_LOG_CHARS = 250_000
+
+
+def _now_utc() -> str:
+    return datetime.utcnow().replace(microsecond=0).isoformat() + "Z"
+
+
+def _create_action_job(action: str) -> str:
+    job_id = f"job-{uuid.uuid4().hex[:12]}"
+    with _ACTION_JOBS_LOCK:
+        _ACTION_JOBS[job_id] = {
+            "id": job_id,
+            "action": action,
+            "status": "running",
+            "started_at": _now_utc(),
+            "finished_at": None,
+            "log": "",
+            "result": None,
+        }
+        if len(_ACTION_JOBS) > _MAX_ACTION_JOBS:
+            removable = [jid for jid, row in _ACTION_JOBS.items() if row.get("status") != "running"]
+            for jid in removable[: max(0, len(_ACTION_JOBS) - _MAX_ACTION_JOBS)]:
+                _ACTION_JOBS.pop(jid, None)
+    return job_id
+
+
+def _append_action_job_log(job_id: str, chunk: str) -> None:
+    if not chunk:
+        return
+    with _ACTION_JOBS_LOCK:
+        row = _ACTION_JOBS.get(job_id)
+        if not row:
+            return
+        text = str(row.get("log", "")) + chunk
+        if len(text) > _MAX_ACTION_LOG_CHARS:
+            text = text[-_MAX_ACTION_LOG_CHARS :]
+        row["log"] = text
+
+
+def _finish_action_job(job_id: str, result: Dict[str, Any]) -> None:
+    with _ACTION_JOBS_LOCK:
+        row = _ACTION_JOBS.get(job_id)
+        if not row:
+            return
+        row["result"] = result
+        row["finished_at"] = _now_utc()
+        ok = bool(result.get("ok"))
+        row["status"] = "completed" if ok else "failed"
+
+        output = str(result.get("output", "") or "")
+        if output:
+            text = str(row.get("log", ""))
+            if output not in text:
+                text = f"{text}\n{output}" if text else output
+            if len(text) > _MAX_ACTION_LOG_CHARS:
+                text = text[-_MAX_ACTION_LOG_CHARS :]
+            row["log"] = text
+
+
+def _get_action_job(job_id: str) -> Optional[Dict[str, Any]]:
+    with _ACTION_JOBS_LOCK:
+        row = _ACTION_JOBS.get(job_id)
+        if not row:
+            return None
+        return {
+            "id": row.get("id"),
+            "action": row.get("action"),
+            "status": row.get("status"),
+            "started_at": row.get("started_at"),
+            "finished_at": row.get("finished_at"),
+            "log": row.get("log", ""),
+            "result": row.get("result"),
+        }
+
+
+class _TeeWriter(io.TextIOBase):
+    def __init__(self, sink: io.StringIO, callback: Optional[Callable[[str], None]] = None):
+        super().__init__()
+        self._sink = sink
+        self._callback = callback
+
+    def write(self, s: str) -> int:
+        self._sink.write(s)
+        if self._callback:
+            self._callback(s)
+        return len(s)
+
+    def flush(self) -> None:
+        self._sink.flush()
 
 
 def _split_worlds(raw: str) -> Optional[List[str]]:
@@ -22,6 +125,255 @@ def _split_worlds(raw: str) -> Optional[List[str]]:
     tokens = [x.strip() for x in text.replace(",", " ").split()]
     tokens = [x for x in tokens if x]
     return tokens or None
+
+
+def _parse_optional_text(raw: Any) -> Optional[str]:
+    if raw is None:
+        return None
+    text = str(raw).strip()
+    if not text or text.lower() == "none":
+        return None
+    return text
+
+
+def _parse_optional_int(raw: Any, field: str, minimum: int = 1) -> Optional[int]:
+    if raw in (None, ""):
+        return None
+    try:
+        value = int(raw)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"{field} must be an integer") from exc
+    if value < minimum:
+        raise ValueError(f"{field} must be >= {minimum}")
+    return value
+
+
+def _extract_model_world_count(output: str) -> Tuple[Optional[int], Optional[str]]:
+    text = (output or "").strip()
+    if not text:
+        return None, None
+
+    if re.fullmatch(r"\d+", text):
+        return int(text), None
+
+    candidates: List[Dict[str, Any]] = []
+    try:
+        parsed = json.loads(text)
+        if isinstance(parsed, dict):
+            candidates.append(parsed)
+    except json.JSONDecodeError:
+        pass
+
+    for match in re.finditer(r"\{[\s\S]*?\}", text):
+        blob = match.group(0)
+        try:
+            parsed = json.loads(blob)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(parsed, dict):
+            candidates.append(parsed)
+
+    for item in candidates:
+        raw_count = item.get("count")
+        try:
+            count = int(raw_count)
+        except (TypeError, ValueError):
+            continue
+        reason = str(item.get("reason", "")).strip() or None
+        return count, reason
+
+    match = re.search(r'"count"\s*:\s*(\d+)', text)
+    if match:
+        return int(match.group(1)), None
+
+    return None, None
+
+
+def _build_model_selection_command(template: str, prompt_file: str, workdir: str, intent: str) -> str:
+    replacements = {
+        "{prompt_file}": prompt_file,
+        "{world_id}": "selector",
+        "{world_name}": "selector",
+        "{worktree}": workdir,
+        "{intent}": intent,
+        "{strategy}": "auto-world-count-selection",
+    }
+    command = template
+    for key, value in replacements.items():
+        command = command.replace(key, value)
+    if "{prompt_file}" not in template:
+        command = f'{command} < "{prompt_file}"'
+    return command
+
+
+def _model_world_count(
+    repo: str,
+    config_path: str,
+    intent: str,
+    max_count: int,
+    cli_strategies: Optional[List[str]],
+) -> Tuple[int, str]:
+    if max_count < 1:
+        raise ValueError("max_count must be >= 1")
+
+    cfg = pw.load_config(config_path)
+    codex_cfg = cfg.get("codex", {}) if isinstance(cfg, dict) else {}
+    command_template = str(codex_cfg.get("command", "")).strip()
+    if not command_template:
+        raise ValueError(
+            "max_count auto-selection requires codex.command in parallel_worlds.json, or provide explicit count."
+        )
+
+    timeout_sec = int(codex_cfg.get("timeout_sec", 900) or 900)
+    timeout_sec = max(15, min(timeout_sec, 120))
+
+    strategies_text = "\n".join(f"- {item}" for item in (cli_strategies or [])) or "- (none provided)"
+    prompt_lines = [
+        "You are selecting a branch count for parallel software implementation.",
+        "Return only compact JSON with this exact shape:",
+        '{"count": <integer>, "reason": "<short reason>"}',
+        f"count must be between 1 and {max_count}.",
+        "Prefer fewer branches for simple tasks; more for uncertain or tradeoff-heavy tasks.",
+        "",
+        "Intent:",
+        intent,
+        "",
+        "Strategies:",
+        strategies_text,
+    ]
+    prompt_text = "\n".join(prompt_lines) + "\n"
+
+    prompt_path = ""
+    try:
+        with tempfile.NamedTemporaryFile("w", encoding="utf-8", delete=False, suffix=".md") as tmp:
+            tmp.write(prompt_text)
+            prompt_path = tmp.name
+
+        with tempfile.TemporaryDirectory(prefix="pw-model-count-") as workdir:
+            command = _build_model_selection_command(command_template, prompt_path, workdir, intent)
+            result = subprocess.run(
+                command,
+                cwd=workdir,
+                text=True,
+                capture_output=True,
+                shell=True,
+                timeout=timeout_sec,
+            )
+        output = ((result.stdout or "") + "\n" + (result.stderr or "")).strip()
+        raw_count, reason = _extract_model_world_count(output)
+        if raw_count is None:
+            raise ValueError("model did not return a parseable count JSON")
+
+        count = max(1, min(max_count, int(raw_count)))
+        if reason:
+            return count, f"model-selected {count} world(s) (max={max_count}, reason={reason})"
+        return count, f"model-selected {count} world(s) (max={max_count})"
+    except subprocess.TimeoutExpired as exc:
+        raise ValueError(f"model auto-selection timed out after {timeout_sec}s") from exc
+    except OSError as exc:
+        raise ValueError(f"failed to run model auto-selection command: {exc}") from exc
+    finally:
+        if prompt_path and os.path.exists(prompt_path):
+            try:
+                os.remove(prompt_path)
+            except OSError:
+                pass
+
+
+def _resolve_world_count(
+    repo: str,
+    config_path: str,
+    intent: str,
+    count: Optional[int],
+    max_count: Optional[int],
+    cli_strategies: Optional[List[str]],
+) -> Tuple[Optional[int], str]:
+    if count is not None:
+        if max_count is None:
+            return count, f"using explicit world count={count}"
+        clamped = min(count, max_count)
+        if clamped != count:
+            return clamped, f"explicit count={count} exceeded max_count={max_count}; clamped to {clamped}"
+        return clamped, f"using explicit world count={clamped} (max={max_count})"
+
+    if max_count is None:
+        return None, ""
+
+    return _model_world_count(repo, config_path, intent, max_count, cli_strategies)
+
+
+def _pick_folder_path(prompt: str, default_path: Optional[str]) -> Tuple[bool, Optional[str], str]:
+    if sys.platform != "darwin":
+        return False, None, "Finder picker is only supported on macOS."
+
+    script: List[str] = []
+    safe_prompt = (prompt or "Choose a folder").replace('"', '\\"')
+    base = default_path or ""
+    default_dir = os.path.realpath(base) if base else ""
+    if default_dir and not os.path.isdir(default_dir):
+        default_dir = os.path.dirname(default_dir)
+    if default_dir and os.path.isdir(default_dir):
+        safe_default = default_dir.replace("\\", "\\\\").replace('"', '\\"')
+        script.append(f'set chosenFolder to choose folder with prompt "{safe_prompt}" default location (POSIX file "{safe_default}")')
+    else:
+        script.append(f'set chosenFolder to choose folder with prompt "{safe_prompt}"')
+    script.append("POSIX path of chosenFolder")
+
+    try:
+        result = subprocess.run(["osascript"] + [arg for line in script for arg in ("-e", line)], text=True, capture_output=True, check=False)
+    except OSError as exc:
+        return False, None, str(exc)
+    if result.returncode == 0:
+        chosen = (result.stdout or "").strip()
+        if chosen:
+            return True, chosen, ""
+        return False, None, "No folder was selected."
+
+    combined = ((result.stderr or "") + "\n" + (result.stdout or "")).strip()
+    if "-128" in combined:
+        return False, None, "selection canceled"
+    return False, None, combined or "Unable to open Finder folder picker."
+
+
+def _resolve_git_root(path: str) -> Optional[str]:
+    result = subprocess.run(
+        ["git", "rev-parse", "--show-toplevel"],
+        cwd=path,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    if result.returncode != 0:
+        return None
+    root = (result.stdout or "").strip()
+    return root or None
+
+
+def _slugify_project_dir(name: str) -> str:
+    slug = re.sub(r"[^a-zA-Z0-9._-]+", "-", (name or "").strip().lower()).strip("._-")
+    return slug or "new-project"
+
+
+def _resolve_project_path(
+    raw_path: str,
+    raw_name: str,
+    raw_base_path: str,
+    fallback_base_path: str,
+) -> Tuple[str, Optional[str]]:
+    explicit = (raw_path or "").strip()
+    if explicit:
+        return os.path.abspath(explicit), None
+
+    name = (raw_name or "").strip()
+    if not name:
+        raise ValueError("path or name is required")
+
+    base = (raw_base_path or "").strip() or (fallback_base_path or "").strip()
+    if not base:
+        raise ValueError("base path is required when path is omitted")
+
+    target = os.path.join(os.path.abspath(base), _slugify_project_dir(name))
+    return target, f"derived project path: {target}"
 
 
 def _read_text(path: str) -> str:
@@ -41,23 +393,45 @@ def _tail_text(path: str, lines: int) -> str:
     return "\n".join(all_lines[-lines:])
 
 
-def _run_action(fn, *args, **kwargs) -> Tuple[bool, str]:
-    out = io.StringIO()
-    err = io.StringIO()
-    ok = True
+@contextmanager
+def _pushd(path: Optional[str]):
+    previous = os.getcwd()
     try:
-        with redirect_stdout(out), redirect_stderr(err):
-            fn(*args, **kwargs)
+        if path:
+            os.chdir(path)
+        yield
+    finally:
+        os.chdir(previous)
+
+
+def _run_action(
+    fn,
+    *args,
+    cwd: Optional[str] = None,
+    log_callback: Optional[Callable[[str], None]] = None,
+    **kwargs,
+) -> Tuple[bool, str, Any]:
+    out_buf = io.StringIO()
+    err_buf = io.StringIO()
+    out = _TeeWriter(out_buf, callback=log_callback)
+    err = _TeeWriter(err_buf, callback=log_callback)
+    ok = True
+    result: Any = None
+    try:
+        with _ACTION_LOCK:
+            with _pushd(cwd):
+                with redirect_stdout(out), redirect_stderr(err):
+                    result = fn(*args, **kwargs)
     except SystemExit:
         pass
     except Exception:
         ok = False
         traceback.print_exc(file=err)
 
-    output = (out.getvalue() + err.getvalue()).strip()
+    output = (out_buf.getvalue() + err_buf.getvalue()).strip()
     if "error:" in output.lower():
         ok = False
-    return ok, output
+    return ok, output, result
 
 
 def _serialize_world_row(repo: str, branchpoint_id: str, world_id: str) -> Dict[str, Any]:
@@ -98,6 +472,60 @@ def _serialize_world_row(repo: str, branchpoint_id: str, world_id: str) -> Dict[
     }
 
 
+def _is_merged_into(repo: str, source_branch: str, target_branch: str) -> bool:
+    if not source_branch or not target_branch:
+        return False
+    result = git(["merge-base", "--is-ancestor", source_branch, target_branch], cwd=repo, check=False)
+    return result.returncode == 0
+
+
+def _dashboard_branch_summary(repo: str, branchpoints: List[Dict[str, Any]], selected_branchpoint_id: Optional[str]) -> Dict[str, int]:
+    summary = {
+        "open_branches_total": 0,
+        "awaiting_merge_total": 0,
+        "open_branches_current": 0,
+        "awaiting_merge_current": 0,
+    }
+    selected_id = (selected_branchpoint_id or "").strip()
+
+    for branchpoint in branchpoints:
+        bp_id = str(branchpoint.get("id", "")).strip()
+        base_branch = str(branchpoint.get("base_branch", "")).strip()
+        selected_world_id = str(branchpoint.get("selected_world_id", "")).strip()
+        world_ids = branchpoint.get("world_ids") or []
+        if not isinstance(world_ids, list):
+            continue
+
+        for world_id in world_ids:
+            try:
+                world = pw.load_world(repo, str(world_id))
+            except (SystemExit, Exception):  # pragma: no cover - tolerate stale metadata rows.
+                continue
+
+            branch = str(world.get("branch", "")).strip()
+            if not branch:
+                continue
+
+            is_open = branch_exists(branch, repo)
+            is_feature_complete = (world.get("status") == "pass") or (
+                selected_world_id and world.get("id") == selected_world_id
+            )
+            merged_into_base = _is_merged_into(repo, branch, base_branch) if base_branch else False
+            awaiting_merge = is_open and is_feature_complete and not merged_into_base
+
+            if is_open:
+                summary["open_branches_total"] += 1
+                if selected_id and bp_id == selected_id:
+                    summary["open_branches_current"] += 1
+
+            if awaiting_merge:
+                summary["awaiting_merge_total"] += 1
+                if selected_id and bp_id == selected_id:
+                    summary["awaiting_merge_current"] += 1
+
+    return summary
+
+
 class ParallelWorldsHandler(BaseHTTPRequestHandler):
     server: "ParallelWorldsServer"
 
@@ -106,6 +534,11 @@ class ParallelWorldsHandler(BaseHTTPRequestHandler):
 
     def _cfg(self) -> str:
         return self.server.config_path
+
+    def _set_project(self, repo: str, config_path: str) -> None:
+        self.server.repo = repo
+        self.server.config_path = config_path
+        self.server.ui_dist = os.path.join(repo, "webapp", "dist")
 
     def _json(self, status: int, payload: Dict[str, Any]) -> None:
         body = json.dumps(payload, indent=2).encode("utf-8")
@@ -117,6 +550,24 @@ class ParallelWorldsHandler(BaseHTTPRequestHandler):
         self.send_header("Access-Control-Allow-Methods", "GET,POST,OPTIONS")
         self.end_headers()
         self.wfile.write(body)
+
+    def _start_async_action(self, action: str, runner: Callable[[str], Dict[str, Any]]) -> None:
+        job_id = _create_action_job(action)
+
+        def _target() -> None:
+            try:
+                result = runner(job_id)
+                if not isinstance(result, dict):
+                    result = {"ok": False, "error": "internal error: invalid action result payload"}
+            except Exception as exc:  # pragma: no cover - safety wrapper
+                tb = traceback.format_exc()
+                _append_action_job_log(job_id, f"\n{tb}\n")
+                result = {"ok": False, "error": str(exc), "traceback": tb}
+            _finish_action_job(job_id, result)
+
+        thread = threading.Thread(target=_target, daemon=True, name=f"pw-action-{action}-{job_id}")
+        thread.start()
+        self._json(202, {"ok": True, "job_id": job_id, "status": "running", "action": action})
 
     def _bytes(self, status: int, content_type: str, body: bytes) -> None:
         self.send_response(status)
@@ -144,7 +595,6 @@ class ParallelWorldsHandler(BaseHTTPRequestHandler):
                 self._bytes(200, content_type, f.read())
             return True
 
-        # SPA fallback for route-style paths.
         if "." not in rel:
             index_file = os.path.join(ui_dist, "index.html")
             if os.path.isfile(index_file):
@@ -164,9 +614,6 @@ class ParallelWorldsHandler(BaseHTTPRequestHandler):
         if not isinstance(data, dict):
             return {}
         return data
-
-    def _query(self) -> Dict[str, List[str]]:
-        return parse_qs(urlparse(self.path).query)
 
     def _latest_branchpoint(self) -> Optional[str]:
         return pw.get_latest_branchpoint(self._repo())
@@ -195,6 +642,32 @@ class ParallelWorldsHandler(BaseHTTPRequestHandler):
                 )
                 return
 
+            if parsed.path == "/api/project":
+                self._json(
+                    200,
+                    {
+                        "ok": True,
+                        "repo": repo,
+                        "config": self._cfg(),
+                        "latest_branchpoint": self._latest_branchpoint(),
+                    },
+                )
+                return
+
+            if parsed.path == "/api/action_status":
+                job_id = (query.get("job") or [""])[0].strip()
+                if not job_id:
+                    self._json(400, {"ok": False, "error": "job is required"})
+                    return
+                job = _get_action_job(job_id)
+                if not job:
+                    self._json(404, {"ok": False, "error": f"job not found: {job_id}"})
+                    return
+                payload = {"ok": True}
+                payload.update(job)
+                self._json(200, payload)
+                return
+
             if parsed.path == "/api/branchpoints":
                 rows = pw.list_branchpoints(repo)
                 self._json(200, {"ok": True, "items": rows, "latest": self._latest_branchpoint()})
@@ -213,6 +686,7 @@ class ParallelWorldsHandler(BaseHTTPRequestHandler):
                     "selected_branchpoint": bp_id,
                     "branchpoint": None,
                     "world_rows": [],
+                    "summary": _dashboard_branch_summary(repo, items, bp_id),
                 }
 
                 if bp_id:
@@ -301,28 +775,207 @@ class ParallelWorldsHandler(BaseHTTPRequestHandler):
             body = self._parse_json_body()
             action = parsed.path.rsplit("/", 1)[-1]
 
+            if action == "pick_path":
+                prompt = str(body.get("prompt", "")).strip() or "Choose a folder"
+                default_path = str(body.get("default_path", "")).strip() or None
+                ok, selected_path, message = _pick_folder_path(prompt=prompt, default_path=default_path)
+                if ok and selected_path:
+                    self._json(200, {"ok": True, "path": selected_path, "canceled": False})
+                    return
+                if message == "selection canceled":
+                    self._json(200, {"ok": True, "path": None, "canceled": True})
+                    return
+                self._json(400, {"ok": False, "error": message or "Unable to select folder"})
+                return
+
+            if action == "open_or_create_project":
+                raw_path = str(body.get("path") or "").strip()
+                raw_name = str(body.get("name") or "").strip()
+                raw_base_path = str(body.get("base_path") or "").strip()
+                config_name = str(body.get("config_name", "parallel_worlds.json")).strip() or "parallel_worlds.json"
+                project_name = raw_name or None
+                base_branch = str(body.get("base_branch", "main")).strip() or "main"
+                try:
+                    probe, path_note = _resolve_project_path(
+                        raw_path=raw_path,
+                        raw_name=raw_name,
+                        raw_base_path=raw_base_path,
+                        fallback_base_path=os.path.dirname(repo),
+                    )
+                except ValueError as exc:
+                    self._json(400, {"ok": False, "error": str(exc)})
+                    return
+
+                if os.path.exists(probe) and not os.path.isdir(probe):
+                    self._json(400, {"ok": False, "error": f"project path exists and is not a directory: {probe}"})
+                    return
+
+                git_root = _resolve_git_root(probe) if os.path.isdir(probe) else None
+                if git_root:
+                    ok, output, result = _run_action(
+                        pw.switch_project,
+                        project_path=probe,
+                        config_name=config_name,
+                        cwd=None,
+                    )
+                    mode = "switched"
+                else:
+                    if os.path.isdir(probe):
+                        entries = [name for name in os.listdir(probe) if name not in {".DS_Store"}]
+                        if entries:
+                            self._json(
+                                400,
+                                {
+                                    "ok": False,
+                                    "error": (
+                                        "path is not a git repository and directory is not empty; "
+                                        "choose an existing repo or an empty/new directory"
+                                    ),
+                                },
+                            )
+                            return
+                    ok, output, result = _run_action(
+                        pw.create_project,
+                        project_path=probe,
+                        project_name=project_name,
+                        base_branch=base_branch,
+                        config_name=config_name,
+                        cwd=None,
+                    )
+                    mode = "created"
+
+                if ok and isinstance(result, tuple) and len(result) == 2:
+                    repo, cfg = str(result[0]), str(result[1])
+                    self._set_project(repo, cfg)
+                if ok and path_note:
+                    output = f"{path_note}\n{output}" if output else path_note
+                self._json(
+                    200 if ok else 400,
+                    {
+                        "ok": ok,
+                        "mode": mode if ok else None,
+                        "output": output,
+                        "repo": repo,
+                        "config": cfg,
+                        "latest_branchpoint": pw.get_latest_branchpoint(repo),
+                    },
+                )
+                return
+
+            if action == "new_project":
+                raw_path = str(body.get("path") or "").strip()
+                raw_name = str(body.get("name") or "").strip()
+                raw_base_path = str(body.get("base_path") or "").strip()
+                project_name = raw_name or None
+                base_branch = str(body.get("base_branch", "main")).strip() or "main"
+                config_name = str(body.get("config_name", "parallel_worlds.json")).strip() or "parallel_worlds.json"
+                try:
+                    project_path, path_note = _resolve_project_path(
+                        raw_path=raw_path,
+                        raw_name=raw_name,
+                        raw_base_path=raw_base_path,
+                        fallback_base_path=os.path.dirname(repo),
+                    )
+                except ValueError as exc:
+                    self._json(400, {"ok": False, "error": str(exc)})
+                    return
+                ok, output, result = _run_action(
+                    pw.create_project,
+                    project_path=project_path,
+                    project_name=project_name,
+                    base_branch=base_branch,
+                    config_name=config_name,
+                    cwd=None,
+                )
+                if ok and isinstance(result, tuple) and len(result) == 2:
+                    repo, cfg = str(result[0]), str(result[1])
+                    self._set_project(repo, cfg)
+                if ok and path_note:
+                    output = f"{path_note}\n{output}" if output else path_note
+                self._json(
+                    200 if ok else 400,
+                    {
+                        "ok": ok,
+                        "output": output,
+                        "repo": repo,
+                        "config": cfg,
+                        "latest_branchpoint": pw.get_latest_branchpoint(repo),
+                    },
+                )
+                return
+
+            if action == "switch_project":
+                project_path = str(body.get("path", "")).strip()
+                if not project_path:
+                    self._json(400, {"ok": False, "error": "path is required"})
+                    return
+                config_name = str(body.get("config_name", "parallel_worlds.json")).strip() or "parallel_worlds.json"
+                ok, output, result = _run_action(
+                    pw.switch_project,
+                    project_path=project_path,
+                    config_name=config_name,
+                    cwd=None,
+                )
+                if ok and isinstance(result, tuple) and len(result) == 2:
+                    repo, cfg = str(result[0]), str(result[1])
+                    self._set_project(repo, cfg)
+                self._json(
+                    200 if ok else 400,
+                    {
+                        "ok": ok,
+                        "output": output,
+                        "repo": repo,
+                        "config": cfg,
+                        "latest_branchpoint": pw.get_latest_branchpoint(repo),
+                    },
+                )
+                return
+
             if action == "kickoff":
                 intent = str(body.get("intent", "")).strip()
                 if not intent:
                     self._json(400, {"ok": False, "error": "intent is required"})
                     return
-                count_raw = body.get("count")
-                count = int(count_raw) if count_raw not in (None, "") else None
-                from_ref = str(body.get("from_ref", "")).strip() or None
+                try:
+                    count = _parse_optional_int(body.get("count"), "count")
+                    max_count = _parse_optional_int(body.get("max_count"), "max_count")
+                except ValueError as exc:
+                    self._json(400, {"ok": False, "error": str(exc)})
+                    return
+                from_ref = _parse_optional_text(body.get("from_ref"))
                 strategies = body.get("strategies")
                 cli_strategies = None
                 if isinstance(strategies, list):
                     cli_strategies = [str(x).strip() for x in strategies if str(x).strip()]
+                try:
+                    resolved_count, count_note = _resolve_world_count(
+                        repo=repo,
+                        config_path=cfg,
+                        intent=intent,
+                        count=count,
+                        max_count=max_count,
+                        cli_strategies=cli_strategies,
+                    )
+                except ValueError as exc:
+                    self._json(400, {"ok": False, "error": str(exc)})
+                    return
 
-                ok, output = _run_action(
-                    pw.kickoff_worlds,
-                    config_path=cfg,
-                    intent=intent,
-                    count=count,
-                    from_ref=from_ref,
-                    cli_strategies=cli_strategies,
-                )
-                self._json(200 if ok else 400, {"ok": ok, "output": output, "latest_branchpoint": pw.get_latest_branchpoint(repo)})
+                def _kickoff_job(job_id: str) -> Dict[str, Any]:
+                    ok, output, _ = _run_action(
+                        pw.kickoff_worlds,
+                        config_path=cfg,
+                        intent=intent,
+                        count=resolved_count,
+                        from_ref=from_ref,
+                        cli_strategies=cli_strategies,
+                        cwd=repo,
+                        log_callback=lambda chunk: _append_action_job_log(job_id, chunk),
+                    )
+                    if count_note:
+                        output = f"{count_note}\n{output}" if output else count_note
+                    return {"ok": ok, "output": output, "latest_branchpoint": pw.get_latest_branchpoint(repo)}
+
+                self._start_async_action("kickoff", _kickoff_job)
                 return
 
             if action == "run":
@@ -330,15 +983,21 @@ class ParallelWorldsHandler(BaseHTTPRequestHandler):
                 world_filters = _split_worlds(str(body.get("worlds", "")))
                 skip_runner = bool(body.get("skip_runner", False))
                 skip_codex = bool(body.get("skip_codex", False))
-                ok, output = _run_action(
-                    pw.run_branchpoint,
-                    config_path=cfg,
-                    branchpoint_id=branchpoint_id,
-                    skip_runner=skip_runner,
-                    skip_codex=skip_codex,
-                    world_filters=world_filters,
-                )
-                self._json(200 if ok else 400, {"ok": ok, "output": output})
+
+                def _run_job(job_id: str) -> Dict[str, Any]:
+                    ok, output, _ = _run_action(
+                        pw.run_branchpoint,
+                        config_path=cfg,
+                        branchpoint_id=branchpoint_id,
+                        skip_runner=skip_runner,
+                        skip_codex=skip_codex,
+                        world_filters=world_filters,
+                        cwd=repo,
+                        log_callback=lambda chunk: _append_action_job_log(job_id, chunk),
+                    )
+                    return {"ok": ok, "output": output}
+
+                self._start_async_action("run", _run_job)
                 return
 
             if action == "play":
@@ -350,16 +1009,21 @@ class ParallelWorldsHandler(BaseHTTPRequestHandler):
                 preview_raw = body.get("preview_lines")
                 preview = int(preview_raw) if preview_raw not in (None, "") else None
 
-                ok, output = _run_action(
-                    pw.play_branchpoint,
-                    config_path=cfg,
-                    branchpoint_id=branchpoint_id,
-                    world_filters=world_filters,
-                    render_command_override=render_command,
-                    timeout_override=timeout,
-                    preview_lines_override=preview,
-                )
-                self._json(200 if ok else 400, {"ok": ok, "output": output})
+                def _play_job(job_id: str) -> Dict[str, Any]:
+                    ok, output, _ = _run_action(
+                        pw.play_branchpoint,
+                        config_path=cfg,
+                        branchpoint_id=branchpoint_id,
+                        world_filters=world_filters,
+                        render_command_override=render_command,
+                        timeout_override=timeout,
+                        preview_lines_override=preview,
+                        cwd=repo,
+                        log_callback=lambda chunk: _append_action_job_log(job_id, chunk),
+                    )
+                    return {"ok": ok, "output": output}
+
+                self._start_async_action("play", _play_job)
                 return
 
             if action == "select":
@@ -370,15 +1034,21 @@ class ParallelWorldsHandler(BaseHTTPRequestHandler):
                     return
                 target_branch = str(body.get("target_branch", "")).strip() or None
                 merge = bool(body.get("merge", False))
-                ok, output = _run_action(
-                    pw.select_world,
-                    config_path=cfg,
-                    branchpoint_id=branchpoint_id,
-                    world_token=world,
-                    merge=merge,
-                    target_branch=target_branch,
-                )
-                self._json(200 if ok else 400, {"ok": ok, "output": output})
+
+                def _select_job(job_id: str) -> Dict[str, Any]:
+                    ok, output, _ = _run_action(
+                        pw.select_world,
+                        config_path=cfg,
+                        branchpoint_id=branchpoint_id,
+                        world_token=world,
+                        merge=merge,
+                        target_branch=target_branch,
+                        cwd=repo,
+                        log_callback=lambda chunk: _append_action_job_log(job_id, chunk),
+                    )
+                    return {"ok": ok, "output": output}
+
+                self._start_async_action("select", _select_job)
                 return
 
             if action == "refork":
@@ -391,22 +1061,46 @@ class ParallelWorldsHandler(BaseHTTPRequestHandler):
                 if not intent:
                     self._json(400, {"ok": False, "error": "intent is required"})
                     return
-                count_raw = body.get("count")
-                count = int(count_raw) if count_raw not in (None, "") else None
+                try:
+                    count = _parse_optional_int(body.get("count"), "count")
+                    max_count = _parse_optional_int(body.get("max_count"), "max_count")
+                except ValueError as exc:
+                    self._json(400, {"ok": False, "error": str(exc)})
+                    return
                 strategies = body.get("strategies")
                 cli_strategies = None
                 if isinstance(strategies, list):
                     cli_strategies = [str(x).strip() for x in strategies if str(x).strip()]
-                ok, output = _run_action(
-                    pw.refork_world,
-                    config_path=cfg,
-                    branchpoint_id=branchpoint_id,
-                    world_token=world,
-                    intent=intent,
-                    count=count,
-                    cli_strategies=cli_strategies,
-                )
-                self._json(200 if ok else 400, {"ok": ok, "output": output, "latest_branchpoint": pw.get_latest_branchpoint(repo)})
+                try:
+                    resolved_count, count_note = _resolve_world_count(
+                        repo=repo,
+                        config_path=cfg,
+                        intent=intent,
+                        count=count,
+                        max_count=max_count,
+                        cli_strategies=cli_strategies,
+                    )
+                except ValueError as exc:
+                    self._json(400, {"ok": False, "error": str(exc)})
+                    return
+
+                def _refork_job(job_id: str) -> Dict[str, Any]:
+                    ok, output, _ = _run_action(
+                        pw.refork_world,
+                        config_path=cfg,
+                        branchpoint_id=branchpoint_id,
+                        world_token=world,
+                        intent=intent,
+                        count=resolved_count,
+                        cli_strategies=cli_strategies,
+                        cwd=repo,
+                        log_callback=lambda chunk: _append_action_job_log(job_id, chunk),
+                    )
+                    if count_note:
+                        output = f"{count_note}\n{output}" if output else count_note
+                    return {"ok": ok, "output": output, "latest_branchpoint": pw.get_latest_branchpoint(repo)}
+
+                self._start_async_action("refork", _refork_job)
                 return
 
             if action == "autopilot":
@@ -414,9 +1108,13 @@ class ParallelWorldsHandler(BaseHTTPRequestHandler):
                 if not prompt:
                     self._json(400, {"ok": False, "error": "prompt is required"})
                     return
-                count_raw = body.get("count")
-                count = int(count_raw) if count_raw not in (None, "") else None
-                from_ref = str(body.get("from_ref", "")).strip() or None
+                try:
+                    count = _parse_optional_int(body.get("count"), "count")
+                    max_count = _parse_optional_int(body.get("max_count"), "max_count")
+                except ValueError as exc:
+                    self._json(400, {"ok": False, "error": str(exc)})
+                    return
+                from_ref = _parse_optional_text(body.get("from_ref"))
                 run_after_kickoff = bool(body.get("run", True))
                 play_after_run = bool(body.get("play", False))
                 skip_runner = bool(body.get("skip_runner", False))
@@ -430,22 +1128,42 @@ class ParallelWorldsHandler(BaseHTTPRequestHandler):
                 cli_strategies = None
                 if isinstance(strategies, list):
                     cli_strategies = [str(x).strip() for x in strategies if str(x).strip()]
-                ok, output = _run_action(
-                    pw.autopilot_worlds,
-                    config_path=cfg,
-                    prompt=prompt,
-                    count=count,
-                    from_ref=from_ref,
-                    cli_strategies=cli_strategies,
-                    run_after_kickoff=run_after_kickoff,
-                    play_after_run=play_after_run,
-                    skip_runner=skip_runner,
-                    skip_codex=skip_codex,
-                    render_command_override=render_command,
-                    timeout_override=timeout,
-                    preview_lines_override=preview,
-                )
-                self._json(200 if ok else 400, {"ok": ok, "output": output, "latest_branchpoint": pw.get_latest_branchpoint(repo)})
+                try:
+                    resolved_count, count_note = _resolve_world_count(
+                        repo=repo,
+                        config_path=cfg,
+                        intent=prompt,
+                        count=count,
+                        max_count=max_count,
+                        cli_strategies=cli_strategies,
+                    )
+                except ValueError as exc:
+                    self._json(400, {"ok": False, "error": str(exc)})
+                    return
+
+                def _autopilot_job(job_id: str) -> Dict[str, Any]:
+                    ok, output, _ = _run_action(
+                        pw.autopilot_worlds,
+                        config_path=cfg,
+                        prompt=prompt,
+                        count=resolved_count,
+                        from_ref=from_ref,
+                        cli_strategies=cli_strategies,
+                        run_after_kickoff=run_after_kickoff,
+                        play_after_run=play_after_run,
+                        skip_runner=skip_runner,
+                        skip_codex=skip_codex,
+                        render_command_override=render_command,
+                        timeout_override=timeout,
+                        preview_lines_override=preview,
+                        cwd=repo,
+                        log_callback=lambda chunk: _append_action_job_log(job_id, chunk),
+                    )
+                    if count_note:
+                        output = f"{count_note}\n{output}" if output else count_note
+                    return {"ok": ok, "output": output, "latest_branchpoint": pw.get_latest_branchpoint(repo)}
+
+                self._start_async_action("autopilot", _autopilot_job)
                 return
 
             self._json(404, {"ok": False, "error": f"unknown action: {action}"})
@@ -463,13 +1181,14 @@ class ParallelWorldsServer(ThreadingHTTPServer):
 
 def serve(config_path: str, host: str, port: int) -> None:
     repo = pw.ensure_git_repo()
-    pw.load_config(config_path)
+    cfg_path = config_path if os.path.isabs(config_path) else os.path.join(repo, config_path)
+    pw.load_config(cfg_path)
     pw.ensure_metadata_dirs(repo)
     ui_dist = os.path.join(repo, "webapp", "dist")
-    server = ParallelWorldsServer((host, port), ParallelWorldsHandler, repo=repo, config_path=config_path, ui_dist=ui_dist)
+    server = ParallelWorldsServer((host, port), ParallelWorldsHandler, repo=repo, config_path=cfg_path, ui_dist=ui_dist)
     print(f"Parallel Worlds API running on http://{host}:{port}", flush=True)
     print(f"Repo: {repo}", flush=True)
-    print(f"Config: {config_path}", flush=True)
+    print(f"Config: {cfg_path}", flush=True)
     if os.path.isdir(ui_dist):
         print(f"Serving built UI: {ui_dist}", flush=True)
     else:
