@@ -8,6 +8,7 @@ import mimetypes
 import os
 import time
 import traceback
+import uuid
 from contextlib import redirect_stderr, redirect_stdout
 from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -15,6 +16,9 @@ from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import parse_qs, unquote, urlparse
 
 import pw
+from parallel_worlds import compiler as pw_compiler
+from parallel_worlds import state as pw_state
+from parallel_worlds.common import now_utc
 from parallel_worlds.runtime_control import (
     apply_task_action,
     append_steering_comment,
@@ -634,7 +638,10 @@ class ParallelWorldsHandler(BaseHTTPRequestHandler):
         raw = self.rfile.read(length).decode("utf-8", errors="replace")
         if not raw.strip():
             return {}
-        data = json.loads(raw)
+        try:
+            data = json.loads(raw)
+        except json.JSONDecodeError:
+            return {}
         if not isinstance(data, dict):
             return {}
         return data
@@ -677,6 +684,37 @@ class ParallelWorldsHandler(BaseHTTPRequestHandler):
 
                 self._json(404, {"ok": False, "error": f"unknown run route: {run_suffix}"})
                 return
+
+            if parsed.path.startswith("/api/v1/"):
+                parts = [segment for segment in parsed.path.strip("/").split("/") if segment]
+                if len(parts) == 4 and parts[:3] == ["api", "v1", "projects"]:
+                    project_id = parts[3]
+                    project = pw_state.load_project(repo, project_id)
+                    if not project:
+                        self._json(404, {"ok": False, "error": "project not found"})
+                        return
+
+                    latest_plan = None
+                    latest_plan_id = project.get("latest_plan_id")
+                    if latest_plan_id:
+                        plan = pw_state.load_plan(repo, latest_plan_id)
+                        if plan:
+                            latest_plan = {
+                                "plan_id": plan.get("id"),
+                                "version": plan.get("version"),
+                                "status": plan.get("status"),
+                                "created_at": plan.get("created_at"),
+                            }
+
+                    project_summary = {
+                        "project_id": project.get("id"),
+                        "name": project.get("name"),
+                        "vision": project.get("vision"),
+                        "created_at": project.get("created_at"),
+                        "updated_at": project.get("updated_at"),
+                    }
+                    self._json(200, {"ok": True, "project": project_summary, "latest_plan": latest_plan})
+                    return
 
             if parsed.path == "/api/health":
                 self._json(
@@ -836,11 +874,103 @@ class ParallelWorldsHandler(BaseHTTPRequestHandler):
                 self._error(500, "INTERNAL_ERROR", str(exc))
                 return
 
-        if not parsed.path.startswith("/api/action/"):
-            self._json(404, {"ok": False, "error": "not found"})
-            return
-
         try:
+            if parsed.path.startswith("/api/v1/"):
+                parts = [segment for segment in parsed.path.strip("/").split("/") if segment]
+                body = self._parse_json_body()
+
+                if len(parts) == 3 and parts[:3] == ["api", "v1", "projects"]:
+                    name = str(body.get("name", "")).strip()
+                    vision = str(body.get("vision", "")).strip()
+                    if not name:
+                        self._json(400, {"ok": False, "error": "name is required"})
+                        return
+
+                    project_id = str(uuid.uuid4())
+                    created_at = now_utc()
+                    project = {
+                        "id": project_id,
+                        "name": name,
+                        "vision": vision,
+                        "created_at": created_at,
+                        "updated_at": created_at,
+                        "plan_ids": [],
+                        "latest_plan_id": None,
+                        "latest_plan_version": 0,
+                    }
+                    pw_state.save_project(repo, project)
+                    self._json(200, {"ok": True, "project_id": project_id})
+                    return
+
+                if len(parts) == 5 and parts[:3] == ["api", "v1", "projects"] and parts[4] == "plans":
+                    project_id = parts[3]
+                    project = pw_state.load_project(repo, project_id)
+                    if not project:
+                        self._json(404, {"ok": False, "error": "project not found"})
+                        return
+
+                    nodes = body.get("nodes")
+                    edges = body.get("edges")
+                    metadata = body.get("metadata", {})
+                    if not isinstance(nodes, list):
+                        self._json(400, {"ok": False, "error": "nodes must be a list"})
+                        return
+                    if not isinstance(edges, list):
+                        self._json(400, {"ok": False, "error": "edges must be a list"})
+                        return
+                    if not isinstance(metadata, dict):
+                        self._json(400, {"ok": False, "error": "metadata must be an object"})
+                        return
+
+                    version = int(project.get("latest_plan_version", 0)) + 1
+                    plan_id = str(uuid.uuid4())
+                    created_at = now_utc()
+                    plan = {
+                        "id": plan_id,
+                        "project_id": project_id,
+                        "version": version,
+                        "status": "draft",
+                        "canvas": {"nodes": nodes, "edges": edges, "metadata": metadata},
+                        "created_at": created_at,
+                    }
+                    pw_state.save_plan(repo, plan)
+
+                    project["plan_ids"] = list(project.get("plan_ids", [])) + [plan_id]
+                    project["latest_plan_id"] = plan_id
+                    project["latest_plan_version"] = version
+                    project["updated_at"] = created_at
+                    pw_state.save_project(repo, project)
+
+                    self._json(200, {"ok": True, "plan_id": plan_id, "version": version})
+                    return
+
+                if len(parts) == 5 and parts[:3] == ["api", "v1", "plans"] and parts[4] == "compile":
+                    plan_id = parts[3]
+                    plan = pw_state.load_plan(repo, plan_id)
+                    if not plan:
+                        self._json(404, {"ok": False, "error": "plan not found"})
+                        return
+
+                    project = None
+                    project_id = plan.get("project_id")
+                    if project_id:
+                        project = pw_state.load_project(repo, project_id)
+
+                    compiled, errors = pw_compiler.compile_plan(repo, plan, project)
+                    if errors:
+                        self._json(400, {"ok": False, "error": "invalid plan", "details": errors})
+                        return
+
+                    self._json(200, {"ok": True, "graph_id": compiled.get("graph_id"), "graph": compiled})
+                    return
+
+                self._json(404, {"ok": False, "error": "not found"})
+                return
+
+            if not parsed.path.startswith("/api/action/"):
+                self._json(404, {"ok": False, "error": "not found"})
+                return
+
             body = self._parse_json_body()
             action = parsed.path.rsplit("/", 1)[-1]
 

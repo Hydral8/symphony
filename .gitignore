@@ -2,6 +2,8 @@
 __pycache__/
 *.pyc
 .pycache_local/
+.venv/
+venv/
 
 # Reports and traces
 report.md
@@ -11,3 +13,16 @@ play.md
 # Local worlds directory if created inside repo (not recommended)
 .worlds/
 worlds/
+
+# Node / webapp
+node_modules/
+webapp/node_modules/
+webapp/dist/
+webapp/.vite/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# OS / editor
+.DS_Store
