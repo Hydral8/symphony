@@ -238,12 +238,14 @@ def _launch_world_app(repo: str, branchpoint_id: str, world_id: str) -> Dict[str
 
         has_root_package = os.path.isfile(os.path.join(worktree, "package.json"))
         has_webapp = os.path.isfile(os.path.join(worktree, "webapp", "package.json"))
+        has_webapp_dist_index = os.path.isfile(os.path.join(worktree, "webapp", "dist", "index.html"))
         has_pw_backend = os.path.isfile(os.path.join(worktree, "pw.py")) and os.path.isfile(os.path.join(worktree, "pw_web.py"))
         has_index = os.path.isfile(os.path.join(worktree, "index.html"))
 
         mode = ""
         app_url = ""
         app_port = 0
+        launch_errors: List[str] = []
 
         if has_webapp and shutil.which("npm"):
             frontend_port = _find_free_port(_LAUNCH_HOST)
@@ -251,58 +253,87 @@ def _launch_world_app(repo: str, branchpoint_id: str, world_id: str) -> Dict[str
             frontend_cmd = ["npm", "--prefix", "webapp", "run", "dev", "--", "--host", _LAUNCH_HOST, "--port", str(frontend_port)]
             proc, handle, err = _start_launch_process(frontend_cmd, worktree, frontend_log, "frontend", wait_port=frontend_port)
             if err:
-                raise ValueError(err)
-            processes.append({"proc": proc, "log_handle": handle})
-            logs.append(frontend_log)
+                launch_errors.append(err)
+            else:
+                processes.append({"proc": proc, "log_handle": handle})
+                logs.append(frontend_log)
+                backend_ok = True
+                if has_pw_backend:
+                    backend_port = _find_free_port(_LAUNCH_HOST)
+                    backend_log = os.path.join(meta_dir, "launch-backend.log")
+                    backend_cmd = [sys.executable, "pw.py", "web", "--host", _LAUNCH_HOST, "--port", str(backend_port)]
+                    proc_b, handle_b, err_b = _start_launch_process(
+                        backend_cmd,
+                        worktree,
+                        backend_log,
+                        "backend",
+                        wait_port=backend_port,
+                    )
+                    if err_b:
+                        backend_ok = False
+                        launch_errors.append(err_b)
+                        _cleanup_launch_entry({"processes": processes})
+                        processes = []
+                        logs = []
+                    else:
+                        processes.append({"proc": proc_b, "log_handle": handle_b})
+                        logs.append(backend_log)
 
-            if has_pw_backend:
-                backend_port = _find_free_port(_LAUNCH_HOST)
-                backend_log = os.path.join(meta_dir, "launch-backend.log")
-                backend_cmd = [sys.executable, "pw.py", "web", "--host", _LAUNCH_HOST, "--port", str(backend_port)]
-                proc_b, handle_b, err_b = _start_launch_process(
-                    backend_cmd,
-                    worktree,
-                    backend_log,
-                    "backend",
-                    wait_port=backend_port,
-                )
-                if err_b:
-                    for p in processes:
-                        _cleanup_launch_entry({"processes": [p]})
-                    raise ValueError(err_b)
-                processes.append({"proc": proc_b, "log_handle": handle_b})
-                logs.append(backend_log)
+                if backend_ok:
+                    mode = "webapp-dev"
+                    app_port = frontend_port
+                    app_url = f"http://{_LAUNCH_HOST}:{frontend_port}"
 
-            mode = "webapp-dev"
-            app_port = frontend_port
-            app_url = f"http://{_LAUNCH_HOST}:{frontend_port}"
-        elif has_root_package and shutil.which("npm"):
+        if not app_url and has_root_package and shutil.which("npm"):
             port = _find_free_port(_LAUNCH_HOST)
             log_path = os.path.join(meta_dir, "launch-dev.log")
             cmd = ["npm", "run", "dev", "--", "--host", _LAUNCH_HOST, "--port", str(port)]
             proc, handle, err = _start_launch_process(cmd, worktree, log_path, "dev server", wait_port=port)
             if err:
-                raise ValueError(err)
-            processes.append({"proc": proc, "log_handle": handle})
-            logs.append(log_path)
-            mode = "node-dev"
-            app_port = port
-            app_url = f"http://{_LAUNCH_HOST}:{port}"
-        elif has_index:
+                launch_errors.append(err)
+            else:
+                processes.append({"proc": proc, "log_handle": handle})
+                logs.append(log_path)
+                mode = "node-dev"
+                app_port = port
+                app_url = f"http://{_LAUNCH_HOST}:{port}"
+
+        if not app_url and has_webapp_dist_index:
+            webapp_dist = os.path.join(worktree, "webapp", "dist")
+            port = _find_free_port(_LAUNCH_HOST)
+            log_path = os.path.join(meta_dir, "launch-static-webapp.log")
+            cmd = [sys.executable, "-m", "http.server", str(port), "--bind", _LAUNCH_HOST]
+            proc, handle, err = _start_launch_process(cmd, webapp_dist, log_path, "webapp static server", wait_port=port)
+            if err:
+                launch_errors.append(err)
+            else:
+                processes.append({"proc": proc, "log_handle": handle})
+                logs.append(log_path)
+                mode = "webapp-static"
+                app_port = port
+                app_url = f"http://{_LAUNCH_HOST}:{port}"
+
+        if not app_url and has_index:
             port = _find_free_port(_LAUNCH_HOST)
             log_path = os.path.join(meta_dir, "launch-static.log")
             cmd = [sys.executable, "-m", "http.server", str(port), "--bind", _LAUNCH_HOST]
             proc, handle, err = _start_launch_process(cmd, worktree, log_path, "static server", wait_port=port)
             if err:
-                raise ValueError(err)
-            processes.append({"proc": proc, "log_handle": handle})
-            logs.append(log_path)
-            mode = "static-http"
-            app_port = port
-            app_url = f"http://{_LAUNCH_HOST}:{port}"
-        else:
+                launch_errors.append(err)
+            else:
+                processes.append({"proc": proc, "log_handle": handle})
+                logs.append(log_path)
+                mode = "static-http"
+                app_port = port
+                app_url = f"http://{_LAUNCH_HOST}:{port}"
+
+        if not app_url:
+            if launch_errors:
+                raise ValueError(
+                    "unable to launch app. tried dev/static modes: " + " | ".join(launch_errors)
+                )
             raise ValueError(
-                "unable to launch app: expected webapp/package.json, package.json with dev script, or index.html"
+                "unable to launch app: expected webapp/package.json, webapp/dist/index.html, package.json with dev script, or index.html"
             )
 
         entry = {

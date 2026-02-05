@@ -343,6 +343,8 @@ textarea:focus {
   font-size: 0.76rem;
   color: var(--ink-soft);
   background: rgba(255, 255, 255, 0.8);
+  max-width: 100%;
+  overflow-wrap: anywhere;
 }
 
 .dag-root-node {
@@ -430,6 +432,31 @@ textarea:focus {
   display: grid;
   gap: 12px;
   grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+}
+
+.all-branches-wrap {
+  margin-bottom: 14px;
+}
+
+.all-branches-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.all-branch-pill {
+  display: inline-flex;
+  align-items: center;
+  padding: 4px 8px;
+  border-radius: 999px;
+  border: 1px solid var(--line);
+  background: rgba(255, 255, 255, 0.82);
+  max-width: 100%;
+}
+
+.all-branch-pill code {
+  font-size: 0.76rem;
+  overflow-wrap: anywhere;
 }
 
 .world-card {

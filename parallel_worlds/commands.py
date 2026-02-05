@@ -706,6 +706,14 @@ def _apply_render_result(
     world["last_render_file"] = render_file(repo, bp_id, world["id"])
     world["last_render_exit_code"] = result.get("exit_code")
     world["last_render_duration_sec"] = result.get("duration_sec")
+    if result.get("error"):
+        world["status"] = "error"
+    elif result.get("exit_code") == 0:
+        world["status"] = "played"
+    elif result.get("exit_code") is None:
+        world["status"] = world.get("status") or "ready"
+    else:
+        world["status"] = "fail"
     save_world(repo, world)
 
     print(

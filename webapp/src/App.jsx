@@ -353,6 +353,28 @@ export default function App() {
     return { rows, total: nodes.length };
   }, [branchpointWorldMap, branchpoints]);
 
+  const allBranches = useMemo(() => {
+    const rows = [];
+    const allBranchpointWorlds =
+      branchpointWorldMap && typeof branchpointWorldMap === "object" ? branchpointWorldMap : {};
+    for (const [bpId, worlds] of Object.entries(allBranchpointWorlds)) {
+      if (!Array.isArray(worlds)) continue;
+      for (const world of worlds) {
+        const branch = String(world?.branch || "").trim();
+        if (!branch) continue;
+        rows.push({
+          key: `${bpId}:${world?.id || branch}`,
+          branchpointId: bpId,
+          worldName: String(world?.name || "world").trim() || "world",
+          branch,
+          status: String(world?.status || "ready").trim() || "ready",
+        });
+      }
+    }
+    rows.sort((left, right) => String(left.branch).localeCompare(String(right.branch)));
+    return rows;
+  }, [branchpointWorldMap]);
+
   async function postAction(action, payload, opts = {}) {
     const { refresh = true, switchToLatest = false, resetBranchpoint = false } = opts;
     setBusy(true);
@@ -488,6 +510,61 @@ export default function App() {
     }
   }
 
+  async function launchWorld(worldId, popupWindow = null) {
+    const result = await postAction(
+      "launch",
+      {
+        branchpoint: selectedBranchpoint || "",
+        world: worldId,
+      },
+      { refresh: false },
+    );
+    const url = String(result?.url || "").trim();
+    if (!url) {
+      if (popupWindow && !popupWindow.closed) {
+        try {
+          popupWindow.document.title = "Launch failed";
+          popupWindow.document.body.innerHTML =
+            "<p style='font-family:sans-serif;padding:16px'>Unable to launch app for this world.</p>";
+        } catch (err) {
+          popupWindow.close();
+        }
+      }
+      return null;
+    }
+    if (popupWindow && !popupWindow.closed) {
+      try {
+        popupWindow.location.replace(url);
+        return url;
+      } catch (err) {
+        // Fall through to regular tab open fallback.
+      }
+    }
+    window.open(url, "_blank");
+    return url;
+  }
+
+  async function playInBrowser(worldId) {
+    let popupWindow = null;
+    try {
+      popupWindow = window.open("about:blank", "_blank");
+      if (popupWindow && popupWindow.document) {
+        popupWindow.document.title = "Launching App";
+        popupWindow.document.body.innerHTML = "<p style='font-family:sans-serif;padding:16px'>Preparing app...</p>";
+      }
+    } catch (err) {
+      popupWindow = null;
+    }
+    const launchedUrl = await launchWorld(worldId, popupWindow);
+    if (!launchedUrl && popupWindow && !popupWindow.closed) {
+      try {
+        popupWindow.focus();
+      } catch (err) {
+        // no-op
+      }
+    }
+  }
+
   function forkFromWorld(world) {
     const intent = window.prompt(`New intent forked from ${world.branch}:`);
     if (!intent || !intent.trim()) return;
@@ -501,68 +578,6 @@ export default function App() {
       },
       { switchToLatest: true },
     );
-  }
-
-  async function launchWorld(worldId, popupWindow = null) {
-    const result = await postAction(
-      "launch",
-      {
-        branchpoint: selectedBranchpoint || "",
-        world: worldId,
-      },
-      { refresh: false },
-    );
-    const url = String(result?.url || "").trim();
-    if (!url) {
-      if (popupWindow && !popupWindow.closed) {
-        popupWindow.close();
-      }
-      return;
-    }
-    if (popupWindow && !popupWindow.closed) {
-      popupWindow.location.href = url;
-      return;
-    }
-    window.open(url, "_blank", "noopener,noreferrer");
-  }
-
-  async function runOrPlayAndLaunch(mode, worldId) {
-    let popupWindow = null;
-    try {
-      popupWindow = window.open("about:blank", "_blank", "noopener,noreferrer");
-      if (popupWindow && popupWindow.document) {
-        popupWindow.document.title = "Launching App";
-        popupWindow.document.body.innerHTML = "<p style='font-family:sans-serif;padding:16px'>Preparing app...</p>";
-      }
-    } catch (err) {
-      popupWindow = null;
-    }
-
-    const isPlay = mode === "play";
-    const action = isPlay ? "play" : "run";
-    const payload = isPlay
-      ? {
-          branchpoint: selectedBranchpoint || "",
-          worlds: worldId,
-          render_command: playForm.renderCommand.trim() || null,
-          timeout: asInt(playForm.timeout),
-          preview_lines: asInt(playForm.previewLines),
-        }
-      : {
-          branchpoint: selectedBranchpoint || "",
-          worlds: worldId,
-          skip_codex: runForm.skipCodex,
-          skip_runner: runForm.skipRunner,
-        };
-
-    const result = await postAction(action, payload);
-    if (!result || result.ok === false) {
-      if (popupWindow && !popupWindow.closed) {
-        popupWindow.close();
-      }
-      return;
-    }
-    await launchWorld(worldId, popupWindow);
   }
 
   function toggleCompareWorld(worldId) {
@@ -1265,8 +1280,12 @@ export default function App() {
                     {row.worlds.length > 0 ? (
                       <div className="dag-tree-worlds">
                         {row.worlds.map((world) => (
-                          <span key={`dag-world-${row.branchpoint.id}-${world.id}`} className={`dag-world-pill tone-${statusTone(world.status)}`}>
-                            {world.name}
+                          <span
+                            key={`dag-world-${row.branchpoint.id}-${world.id}`}
+                            className={`dag-world-pill tone-${statusTone(world.status)}`}
+                            title={world.branch || world.id}
+                          >
+                            {world.branch || world.name}
                           </span>
                         ))}
                       </div>
@@ -1315,7 +1334,10 @@ export default function App() {
           <div>
             <h2>World Blocks</h2>
             <p className="subtle">
-              Click <strong>Fork</strong> on any block to split a new branchpoint from that world branch.
+              Use each world block to run code, play/render output, or open the world app in a new browser tab.
+            </p>
+            <p className="subtle">
+              Selected branchpoint: <code>{branchpoint?.id || "none"}</code>
             </p>
           </div>
           <div className="button-row">
@@ -1328,6 +1350,18 @@ export default function App() {
             <button className="btn ghost small" disabled={compareWorldIds.length === 0} onClick={() => setCompareWorldIds([])}>
               Clear Compare
             </button>
+          </div>
+        </div>
+        <div className="all-branches-wrap">
+          <p className="subtle">
+            All branches in repo: <strong>{allBranches.length}</strong>
+          </p>
+          <div className="all-branches-list">
+            {allBranches.map((item) => (
+              <span key={item.key} className={`all-branch-pill tone-${statusTone(item.status)}`} title={`${item.worldName} (${item.branchpointId})`}>
+                <code>{item.branch}</code>
+              </span>
+            ))}
           </div>
         </div>
         {worldRows.length === 0 ? (
@@ -1396,17 +1430,25 @@ export default function App() {
                     </ol>
                   </div>
                   <div className="button-row">
-                    <button className="btn small" disabled={busy} onClick={() => postAction("run", { branchpoint: selectedBranchpoint || "", worlds: world.id })}>
+                    <button
+                      className="btn small"
+                      disabled={busy}
+                      onClick={() =>
+                        postAction("run", {
+                          branchpoint: selectedBranchpoint || "",
+                          worlds: world.id,
+                          skip_codex: true,
+                          skip_runner: false,
+                        })
+                      }
+                    >
                       Run
                     </button>
                     <button className="btn small" disabled={busy} onClick={() => postAction("play", { branchpoint: selectedBranchpoint || "", worlds: world.id })}>
                       Play
                     </button>
-                    <button className="btn small ghost" disabled={busy} onClick={() => runOrPlayAndLaunch("run", world.id)}>
-                      Run + Open
-                    </button>
-                    <button className="btn small ghost" disabled={busy} onClick={() => runOrPlayAndLaunch("play", world.id)}>
-                      Play + Open
+                    <button className="btn small ghost" disabled={busy} onClick={() => playInBrowser(world.id)}>
+                      Play in Browser
                     </button>
                     <button className="btn small" disabled={busy} onClick={() => postAction("select", { branchpoint: selectedBranchpoint || "", world: world.id, merge: false })}>
                       Select
