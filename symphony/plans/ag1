@@ -1,0 +1,123 @@
+Agent 1 Plan: Multi-Layer Canvas UI (task_frontend_canvas_v1)
+Summary
+Implement a new canvas planner UI in App.jsx while preserving the current Parallel Worlds dashboard in the same app behind a view switch. The canvas will support node/edge CRUD (including cross-layer edges), layer + POV filtering, local draft persistence, and schema-aligned JSON export (preview + copy + download).
+Target verification remains: npm --prefix webapp run build.
+
+Public Interfaces / Types Impact
+No backend/API contract changes in Agent 1.
+New frontend state contract (internal) for a schema-aligned draft plan object:
+schema_version, project_id, plan_id, version, metadata, layers, cross_layer_edges, orchestrator_preferences.
+New local persistence interface:
+localStorage key: symphony.canvasPlan.v1.draft.
+Export interface (user-facing):
+JSON preview panel.
+“Copy JSON” action.
+“Download JSON” action producing <plan-name>-v<version>.json.
+Implementation Plan
+
+1. Restructure App to host two views
+   Refactor App.jsx into two top-level views in one file (or same commit split into helper modules if needed):
+   CanvasPlannerView (new, default).
+   ParallelWorldsDashboardView (existing behavior preserved from current App).
+   Add a top-level segmented switch to toggle views without route dependencies.
+   Keep existing dashboard API behavior unchanged (/api/dashboard, /api/action/\*, /api/log, /api/artifact).
+2. Introduce canvas data model and defaults
+   Add constants/enums in frontend code for:
+   Layer kinds, POVs, node types, edge relations, status values, priorities.
+   Initialize planner state with:
+   Required schema fields populated (schema_version: "1.0", UUIDs via crypto.randomUUID(), version: 1).
+   One starter layer if no persisted draft exists.
+   Maintain normalized helper accessors for:
+   allNodes, allEdges, visibleLayers, visibleNodes, visibleEdges.
+3. Build layer + POV filtering controls
+   Add filter controls:
+   Layer selector (all + individual layer IDs).
+   POV selector (all + product/design/engineering/ops).
+   Render only nodes/edges matching active filters.
+   Ensure cross-layer edge visibility requires both endpoint nodes to be currently visible.
+4. Implement node CRUD + drag interactions
+   Create “Add Node” flow from side panel:
+   Required: id, layer*id, type, label, summary, status, position, size.
+   Auto-generate valid node*\* IDs.
+   Node edit flow:
+   Select node by clicking card.
+   Inspector edits core fields (label, summary, type, status, priority, acceptance criteria).
+   Move flow:
+   Drag node cards on canvas using pointer events.
+   Persist updated position.x/y.
+   Delete flow:
+   Remove node and cascade delete all referencing layer edges and cross-layer edges.
+5. Implement edge CRUD with connect mode
+   Add connect mode controls:
+   Edge scope selector (layer edge or cross-layer edge).
+   Relation selector and required toggle.
+   Edge create flow:
+   Click source node then target node to create edge.
+   Prevent self-loop by default unless explicitly allowed (default: disallow).
+   Generate valid edge\_\* IDs.
+   Edge edit/delete flow:
+   Edge list panel with inline edit (relation, required, notes) and delete.
+   Draw edges in canvas with SVG overlay from node center points.
+6. Add layer management
+   Layer CRUD in side panel:
+   Add layer with valid layer\_\* ID, name, kind, pov, order.
+   Edit layer metadata.
+   Delete empty layers only; block deletion when nodes remain (explicit error message).
+   Keep each node’s layer_id consistent; enforce on creation/edit.
+7. Add schema-aligned export + validation gate
+   Build export serializer from in-memory planner state to exact schema shape.
+   Implement frontend validation pass before export:
+   Required object keys present.
+   Enum checks for type, status, priority, relation, kind, pov.
+   ID regex checks (node*, layer*, edge\_ patterns).
+   Per-node layer_id integrity and required nested fields.
+   Show validation results inline:
+   Export enabled only when valid.
+   Error list with actionable messages when invalid.
+   Export actions:
+   JSON preview (JSON.stringify(..., null, 2)).
+   Copy to clipboard.
+   Download as file.
+8. Local persistence
+   Auto-save full draft to localStorage on meaningful state changes.
+   Restore draft on load.
+   Provide “Reset to starter plan” and “Clear local draft” actions.
+9. Styling and responsive behavior
+   Extend styles.css with canvas-specific layout:
+   Left control rail, central canvas board, right inspector/export panel (desktop).
+   Collapsed stacked layout for mobile.
+   Keep existing visual language consistent with current app tokens.
+   Ensure drag/selection remains usable on smaller screens.
+10. Verification
+    Run npm --prefix /Users/bunyasit/dev/symphony/webapp run build.
+    Perform manual acceptance walkthrough (below) before finalizing.
+    Test Cases and Scenarios
+    View switch:
+    Toggle between Canvas and Dashboard.
+    Confirm dashboard actions still render and call existing endpoints.
+    Node CRUD:
+    Add node in selected layer, edit fields, drag position, delete node.
+    Confirm associated edges are removed on node delete.
+    Edge CRUD:
+    Create layer-local edge via connect mode.
+    Create cross-layer edge via connect mode.
+    Edit relation/required and delete edge.
+    Filtering:
+    Layer filter hides unrelated nodes/edges.
+    POV filter restricts to matching layers.
+    Combined filters produce expected intersections.
+    Export validity:
+    Valid draft enables export and produces JSON with required schema shape.
+    Invalid draft blocks export and shows clear validation errors.
+    Persistence:
+    Refresh page and verify draft restored from localStorage.
+    Clear draft action resets state.
+    Build gate:
+    npm --prefix webapp run build passes.
+    Assumptions and Defaults Chosen
+    Keep both UIs in one app, with Canvas as default view.
+    Export is local-only in Agent 1 (no backend save/compile call yet).
+    Cross-layer edges are fully CRUD-capable now.
+    Edge creation uses canvas connect mode (source click -> target click).
+    Drafts persist in browser localStorage.
+    No new npm dependencies are required unless implementation reveals a blocker; fallback is to keep zero-dependency approach.

@@ -30,6 +30,26 @@ def renders_dir(repo: str) -> str:
     return os.path.join(metadata_root(repo), "renders")
 
 
+def task_graphs_dir(repo: str) -> str:
+    return os.path.join(metadata_root(repo), "task_graphs")
+
+
+def orchestrator_runs_dir(repo: str) -> str:
+    return os.path.join(metadata_root(repo), "orchestrator_runs")
+
+
+def orchestrator_events_dir(repo: str) -> str:
+    return os.path.join(metadata_root(repo), "orchestrator_events")
+
+
+def projects_dir(repo: str) -> str:
+    return os.path.join(metadata_root(repo), "projects")
+
+
+def plans_dir(repo: str) -> str:
+    return os.path.join(metadata_root(repo), "plans")
+
+
 def latest_branchpoint_path(repo: str) -> str:
     return os.path.join(metadata_root(repo), "latest_branchpoint.txt")
 
@@ -40,6 +60,11 @@ def ensure_metadata_dirs(repo: str) -> None:
     os.makedirs(runs_dir(repo), exist_ok=True)
     os.makedirs(codex_runs_dir(repo), exist_ok=True)
     os.makedirs(renders_dir(repo), exist_ok=True)
+    os.makedirs(task_graphs_dir(repo), exist_ok=True)
+    os.makedirs(orchestrator_runs_dir(repo), exist_ok=True)
+    os.makedirs(orchestrator_events_dir(repo), exist_ok=True)
+    os.makedirs(projects_dir(repo), exist_ok=True)
+    os.makedirs(plans_dir(repo), exist_ok=True)
 
 
 def set_latest_branchpoint(repo: str, branchpoint_id: str) -> None:
@@ -74,6 +99,26 @@ def codex_run_file(repo: str, branchpoint_id: str, world_id: str) -> str:
 
 def render_file(repo: str, branchpoint_id: str, world_id: str) -> str:
     return os.path.join(renders_dir(repo), branchpoint_id, f"{world_id}.json")
+
+
+def task_graph_file(repo: str, graph_id: str) -> str:
+    return os.path.join(task_graphs_dir(repo), f"{graph_id}.json")
+
+
+def orchestrator_run_file(repo: str, run_id: str) -> str:
+    return os.path.join(orchestrator_runs_dir(repo), f"{run_id}.json")
+
+
+def orchestrator_events_file(repo: str, run_id: str) -> str:
+    return os.path.join(orchestrator_events_dir(repo), f"{run_id}.jsonl")
+
+
+def project_file(repo: str, project_id: str) -> str:
+    return os.path.join(projects_dir(repo), f"{project_id}.json")
+
+
+def plan_file(repo: str, plan_id: str) -> str:
+    return os.path.join(plans_dir(repo), f"{plan_id}.json")
 
 
 def list_branchpoints(repo: str) -> List[Dict[str, Any]]:
@@ -128,6 +173,53 @@ def load_render(repo: str, branchpoint_id: str, world_id: str) -> Optional[Dict[
     return read_json(path)
 
 
+def load_task_graph(repo: str, graph_id: str) -> Optional[Dict[str, Any]]:
+    path = task_graph_file(repo, graph_id)
+    if not os.path.exists(path):
+        return None
+    return read_json(path)
+
+
+def load_orchestrator_run(repo: str, run_id: str) -> Optional[Dict[str, Any]]:
+    path = orchestrator_run_file(repo, run_id)
+    if not os.path.exists(path):
+        return None
+    return read_json(path)
+
+
+def load_orchestrator_events(repo: str, run_id: str, limit: Optional[int] = None) -> List[Dict[str, Any]]:
+    path = orchestrator_events_file(repo, run_id)
+    if not os.path.exists(path):
+        return []
+    with open(path, "r", encoding="utf-8") as f:
+        lines = f.read().splitlines()
+    if limit is not None and limit > 0:
+        lines = lines[-limit:]
+    out: List[Dict[str, Any]] = []
+    for line in lines:
+        if not line.strip():
+            continue
+        try:
+            out.append(json.loads(line))
+        except json.JSONDecodeError:
+            continue
+    return out
+
+
+def load_project(repo: str, project_id: str) -> Optional[Dict[str, Any]]:
+    path = project_file(repo, project_id)
+    if not os.path.exists(path):
+        return None
+    return read_json(path)
+
+
+def load_plan(repo: str, plan_id: str) -> Optional[Dict[str, Any]]:
+    path = plan_file(repo, plan_id)
+    if not os.path.exists(path):
+        return None
+    return read_json(path)
+
+
 def save_branchpoint(repo: str, payload: Dict[str, Any]) -> None:
     write_json(branchpoint_file(repo, payload["id"]), payload)
 
@@ -146,6 +238,36 @@ def save_codex_run(repo: str, branchpoint_id: str, world_id: str, payload: Dict[
 
 def save_render(repo: str, branchpoint_id: str, world_id: str, payload: Dict[str, Any]) -> None:
     write_json(render_file(repo, branchpoint_id, world_id), payload)
+
+
+def save_task_graph(repo: str, payload: Dict[str, Any]) -> None:
+    graph_id = payload.get("graph_id")
+    if not graph_id:
+        die("task graph missing graph_id")
+    write_json(task_graph_file(repo, graph_id), payload)
+
+
+def save_orchestrator_run(repo: str, payload: Dict[str, Any]) -> None:
+    run_id = payload.get("id")
+    if not run_id:
+        die("orchestrator run missing id")
+    write_json(orchestrator_run_file(repo, run_id), payload)
+
+
+def append_orchestrator_event(repo: str, run_id: str, payload: Dict[str, Any]) -> None:
+    path = orchestrator_events_file(repo, run_id)
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "a", encoding="utf-8") as f:
+        f.write(json.dumps(payload))
+        f.write("\n")
+
+
+def save_project(repo: str, payload: Dict[str, Any]) -> None:
+    write_json(project_file(repo, payload["id"]), payload)
+
+
+def save_plan(repo: str, payload: Dict[str, Any]) -> None:
+    write_json(plan_file(repo, payload["id"]), payload)
 
 
 def resolve_branchpoint_id(repo: str, explicit_id: Optional[str]) -> str:

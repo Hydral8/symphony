@@ -1,6 +1,58 @@
-import React, { useEffect, useMemo, useState } from "react";
+import React, { useEffect, useMemo, useRef, useState } from "react";
 
 const API_BASE = import.meta.env.VITE_API_BASE || "";
+const LOCAL_STORAGE_KEY = "symphony.canvasPlan.v1.draft";
+
+const LAYER_KINDS = ["vision", "module", "uxui", "backend", "data", "infra", "task"];
+const POVS = ["product", "design", "engineering", "ops"];
+const NODE_TYPES = [
+  "vision",
+  "goal",
+  "module",
+  "component",
+  "screen",
+  "ux_flow",
+  "api",
+  "db_model",
+  "workflow",
+  "task",
+  "note",
+];
+const NODE_STATUSES = ["draft", "validated", "approved", "deprecated"];
+const NODE_PRIORITIES = ["low", "medium", "high", "critical"];
+const EDGE_RELATIONS = [
+  "depends_on",
+  "implements",
+  "informs",
+  "blocks",
+  "contains",
+  "uses_api",
+  "reads_from",
+  "writes_to",
+  "tests",
+];
+
+const UUID_RE = /^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-5][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}$/;
+const NODE_ID_RE = /^node_[a-zA-Z0-9_-]+$/;
+const EDGE_ID_RE = /^edge_[a-zA-Z0-9_-]+$/;
+const LAYER_ID_RE = /^layer_[a-zA-Z0-9_-]+$/;
+
+function nowIso() {
+  return new Date().toISOString();
+}
+
+function safeUUID() {
+  if (typeof crypto !== "undefined" && crypto.randomUUID) return crypto.randomUUID();
+  const bytes = Array.from({ length: 16 }, () => Math.floor(Math.random() * 256));
+  bytes[6] = (bytes[6] & 0x0f) | 0x40;
+  bytes[8] = (bytes[8] & 0x3f) | 0x80;
+  const hex = bytes.map((b) => b.toString(16).padStart(2, "0")).join("");
+  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
+}
+
+function randomId(prefix) {
+  return `${prefix}_${Math.random().toString(36).slice(2, 10)}`;
+}
 
 function parseStrategies(raw) {
   return String(raw || "")
@@ -39,7 +91,1052 @@ async function readJson(url, options) {
   return payload;
 }
 
-export default function App() {
+function splitLines(text) {
+  return String(text || "")
+    .split("\n")
+    .map((line) => line.trim())
+    .filter(Boolean);
+}
+
+function defaultPlan() {
+  const created = nowIso();
+  return {
+    schema_version: "1.0",
+    project_id: safeUUID(),
+    plan_id: safeUUID(),
+    version: 1,
+    created_at: created,
+    updated_at: created,
+    metadata: {
+      name: "Untitled Plan",
+      vision: "Describe the product vision.",
+      goals: ["Define goals"],
+      default_target_branch: "main",
+      constraints: {
+        tech_stack: ["python", "react", "postgres"],
+        non_functional_requirements: ["Deterministic replay"],
+        excluded_paths: ["webapp/node_modules"],
+      },
+    },
+    layers: [
+      {
+        id: randomId("layer"),
+        name: "Core Layer",
+        kind: "module",
+        pov: "engineering",
+        order: 1,
+        nodes: [],
+        edges: [],
+      },
+    ],
+    cross_layer_edges: [],
+    orchestrator_preferences: {
+      max_parallel_agents: 4,
+      retry_limit: 2,
+      quality_gates: ["unit-tests", "lint"],
+    },
+  };
+}
+
+function loadLocalDraft() {
+  try {
+    const raw = localStorage.getItem(LOCAL_STORAGE_KEY);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw);
+    if (!parsed || typeof parsed !== "object") return null;
+    return parsed;
+  } catch (err) {
+    return null;
+  }
+}
+
+function validatePlan(plan) {
+  const errors = [];
+  if (!plan || typeof plan !== "object") return ["Plan is missing or invalid."];
+  if (plan.schema_version !== "1.0") errors.push("schema_version must be '1.0'.");
+  if (!UUID_RE.test(plan.project_id || "")) errors.push("project_id must be a UUID.");
+  if (!UUID_RE.test(plan.plan_id || "")) errors.push("plan_id must be a UUID.");
+  if (!Number.isInteger(plan.version) || plan.version < 1) errors.push("version must be an integer >= 1.");
+  if (!plan.metadata || typeof plan.metadata !== "object") errors.push("metadata is required.");
+
+  const metadata = plan.metadata || {};
+  if (!metadata.name || !String(metadata.name).trim()) errors.push("metadata.name is required.");
+  if (!metadata.vision || !String(metadata.vision).trim()) errors.push("metadata.vision is required.");
+  if (!Array.isArray(metadata.goals) || metadata.goals.length < 1) errors.push("metadata.goals must have at least 1 item.");
+
+  if (!Array.isArray(plan.layers) || plan.layers.length < 1) errors.push("layers must contain at least one layer.");
+
+  const layerIds = new Set();
+  const nodeIds = new Set();
+
+  (plan.layers || []).forEach((layer, idx) => {
+    if (!layer || typeof layer !== "object") {
+      errors.push(`layers[${idx}] is invalid.`);
+      return;
+    }
+    if (!LAYER_ID_RE.test(layer.id || "")) errors.push(`layer id ${layer.id || "(missing)"} is invalid.`);
+    if (!layer.name || !String(layer.name).trim()) errors.push(`layer ${layer.id || idx} name is required.`);
+    if (!LAYER_KINDS.includes(layer.kind)) errors.push(`layer ${layer.id || idx} kind is invalid.`);
+    if (!POVS.includes(layer.pov)) errors.push(`layer ${layer.id || idx} pov is invalid.`);
+    if (!Number.isInteger(layer.order) || layer.order < 1) errors.push(`layer ${layer.id || idx} order must be >= 1.`);
+    if (!Array.isArray(layer.nodes)) errors.push(`layer ${layer.id || idx} nodes array is required.`);
+    if (!Array.isArray(layer.edges)) errors.push(`layer ${layer.id || idx} edges array is required.`);
+    if (layer.id) layerIds.add(layer.id);
+
+    (layer.nodes || []).forEach((node) => {
+      if (!NODE_ID_RE.test(node.id || "")) errors.push(`node id ${node.id || "(missing)"} is invalid.`);
+      if (!layer.id || node.layer_id !== layer.id) errors.push(`node ${node.id || "(missing)"} layer_id mismatch.`);
+      if (!NODE_TYPES.includes(node.type)) errors.push(`node ${node.id || "(missing)"} type is invalid.`);
+      if (!node.label || !String(node.label).trim()) errors.push(`node ${node.id || "(missing)"} label is required.`);
+      if (!node.summary || !String(node.summary).trim()) errors.push(`node ${node.id || "(missing)"} summary is required.`);
+      if (!NODE_STATUSES.includes(node.status)) errors.push(`node ${node.id || "(missing)"} status is invalid.`);
+      if (node.priority && !NODE_PRIORITIES.includes(node.priority)) errors.push(`node ${node.id || "(missing)"} priority is invalid.`);
+      if (!node.position || typeof node.position.x !== "number" || typeof node.position.y !== "number") {
+        errors.push(`node ${node.id || "(missing)"} position is invalid.`);
+      }
+      if (!node.size || typeof node.size.w !== "number" || typeof node.size.h !== "number") {
+        errors.push(`node ${node.id || "(missing)"} size is invalid.`);
+      }
+      if (node.size && (node.size.w <= 0 || node.size.h <= 0)) errors.push(`node ${node.id || "(missing)"} size must be > 0.`);
+      if (node.id) nodeIds.add(node.id);
+    });
+
+    (layer.edges || []).forEach((edge) => {
+      if (!EDGE_ID_RE.test(edge.id || "")) errors.push(`edge id ${edge.id || "(missing)"} is invalid.`);
+      if (!NODE_ID_RE.test(edge.source || "")) errors.push(`edge ${edge.id || "(missing)"} source is invalid.`);
+      if (!NODE_ID_RE.test(edge.target || "")) errors.push(`edge ${edge.id || "(missing)"} target is invalid.`);
+      if (!EDGE_RELATIONS.includes(edge.relation)) errors.push(`edge ${edge.id || "(missing)"} relation is invalid.`);
+    });
+  });
+
+  const crossEdges = plan.cross_layer_edges || [];
+  if (!Array.isArray(crossEdges)) {
+    errors.push("cross_layer_edges must be an array.");
+  } else {
+    crossEdges.forEach((edge) => {
+      if (!EDGE_ID_RE.test(edge.id || "")) errors.push(`cross edge id ${edge.id || "(missing)"} is invalid.`);
+      if (!NODE_ID_RE.test(edge.source || "")) errors.push(`cross edge ${edge.id || "(missing)"} source is invalid.`);
+      if (!NODE_ID_RE.test(edge.target || "")) errors.push(`cross edge ${edge.id || "(missing)"} target is invalid.`);
+      if (!EDGE_RELATIONS.includes(edge.relation)) errors.push(`cross edge ${edge.id || "(missing)"} relation is invalid.`);
+    });
+  }
+
+  (plan.layers || []).forEach((layer) => {
+    (layer.edges || []).forEach((edge) => {
+      if (edge.source && !nodeIds.has(edge.source)) errors.push(`edge ${edge.id || "(missing)"} source node not found.`);
+      if (edge.target && !nodeIds.has(edge.target)) errors.push(`edge ${edge.id || "(missing)"} target node not found.`);
+    });
+  });
+  (crossEdges || []).forEach((edge) => {
+    if (edge.source && !nodeIds.has(edge.source)) errors.push(`cross edge ${edge.id || "(missing)"} source node not found.`);
+    if (edge.target && !nodeIds.has(edge.target)) errors.push(`cross edge ${edge.id || "(missing)"} target node not found.`);
+  });
+
+  return errors;
+}
+
+function CanvasPlannerView() {
+  const [plan, setPlan] = useState(() => loadLocalDraft() || defaultPlan());
+  const [selectedLayerId, setSelectedLayerId] = useState("all");
+  const [selectedPov, setSelectedPov] = useState("all");
+  const [selectedNodeId, setSelectedNodeId] = useState(null);
+  const [selectedEdgeKey, setSelectedEdgeKey] = useState(null);
+  const [connectMode, setConnectMode] = useState({
+    active: false,
+    scope: "layer",
+    relation: "depends_on",
+    required: true,
+  });
+  const [connectFromId, setConnectFromId] = useState(null);
+  const [message, setMessage] = useState("");
+  const [addLayerForm, setAddLayerForm] = useState({ name: "", kind: "module", pov: "engineering", order: "" });
+  const [addNodeForm, setAddNodeForm] = useState({
+    layerId: "",
+    type: "module",
+    label: "",
+    summary: "",
+    status: "draft",
+    priority: "medium",
+  });
+
+  const surfaceRef = useRef(null);
+  const [dragState, setDragState] = useState(null);
+
+  useEffect(() => {
+    try {
+      localStorage.setItem(LOCAL_STORAGE_KEY, JSON.stringify(plan));
+    } catch (err) {
+      // ignore persistence errors
+    }
+  }, [plan]);
+
+  useEffect(() => {
+    if (!selectedNodeId) return;
+    const exists = plan.layers.some((layer) => layer.nodes.some((node) => node.id === selectedNodeId));
+    if (!exists) setSelectedNodeId(null);
+  }, [plan, selectedNodeId]);
+
+  useEffect(() => {
+    if (!selectedEdgeKey) return;
+    const [scope, edgeId] = selectedEdgeKey.split(":");
+    const found =
+      scope === "cross"
+        ? plan.cross_layer_edges.some((edge) => edge.id === edgeId)
+        : plan.layers.some((layer) => layer.edges.some((edge) => edge.id === edgeId));
+    if (!found) setSelectedEdgeKey(null);
+  }, [plan, selectedEdgeKey]);
+
+  useEffect(() => {
+    if (!dragState) return;
+    function onPointerMove(event) {
+      if (!surfaceRef.current) return;
+      const rect = surfaceRef.current.getBoundingClientRect();
+      const x = event.clientX - rect.left - dragState.offsetX;
+      const y = event.clientY - rect.top - dragState.offsetY;
+      setPlan((prev) => {
+        const updated = {
+          ...prev,
+          created_at: prev.created_at || nowIso(),
+          updated_at: nowIso(),
+          layers: prev.layers.map((layer) => ({
+            ...layer,
+            nodes: layer.nodes.map((node) =>
+              node.id === dragState.nodeId
+                ? {
+                    ...node,
+                    position: { x: Math.max(0, Math.round(x)), y: Math.max(0, Math.round(y)) },
+                  }
+                : node,
+            ),
+          })),
+        };
+        return updated;
+      });
+    }
+    function onPointerUp() {
+      setDragState(null);
+    }
+    window.addEventListener("pointermove", onPointerMove);
+    window.addEventListener("pointerup", onPointerUp);
+    return () => {
+      window.removeEventListener("pointermove", onPointerMove);
+      window.removeEventListener("pointerup", onPointerUp);
+    };
+  }, [dragState]);
+
+  const nodeMap = useMemo(() => {
+    const map = new Map();
+    plan.layers.forEach((layer) => {
+      layer.nodes.forEach((node) => map.set(node.id, node));
+    });
+    return map;
+  }, [plan.layers]);
+
+  const filteredLayers = useMemo(() => {
+    let layers = plan.layers;
+    if (selectedPov !== "all") {
+      layers = layers.filter((layer) => layer.pov === selectedPov);
+    }
+    if (selectedLayerId !== "all") {
+      layers = layers.filter((layer) => layer.id === selectedLayerId);
+    }
+    return layers;
+  }, [plan.layers, selectedLayerId, selectedPov]);
+
+  const visibleNodes = useMemo(() => filteredLayers.flatMap((layer) => layer.nodes), [filteredLayers]);
+  const visibleNodeIds = useMemo(() => new Set(visibleNodes.map((node) => node.id)), [visibleNodes]);
+
+  const visibleEdges = useMemo(() => {
+    const layerEdges = filteredLayers.flatMap((layer) =>
+      layer.edges.map((edge) => ({ scope: "layer", layerId: layer.id, edge })),
+    );
+    const crossEdges = plan.cross_layer_edges.map((edge) => ({ scope: "cross", layerId: null, edge }));
+    return [...layerEdges, ...crossEdges].filter(
+      (entry) => visibleNodeIds.has(entry.edge.source) && visibleNodeIds.has(entry.edge.target),
+    );
+  }, [filteredLayers, plan.cross_layer_edges, visibleNodeIds]);
+
+  const selectedLayer = useMemo(() => {
+    if (selectedLayerId !== "all") return plan.layers.find((layer) => layer.id === selectedLayerId) || null;
+    return plan.layers[0] || null;
+  }, [plan.layers, selectedLayerId]);
+
+  const selectedNode = useMemo(() => {
+    if (!selectedNodeId) return null;
+    return nodeMap.get(selectedNodeId) || null;
+  }, [nodeMap, selectedNodeId]);
+
+  const selectedEdge = useMemo(() => {
+    if (!selectedEdgeKey) return null;
+    const [scope, edgeId] = selectedEdgeKey.split(":");
+    if (scope === "cross") {
+      return { scope, edge: plan.cross_layer_edges.find((edge) => edge.id === edgeId) || null };
+    }
+    for (const layer of plan.layers) {
+      const match = layer.edges.find((edge) => edge.id === edgeId);
+      if (match) return { scope: "layer", layerId: layer.id, edge: match };
+    }
+    return null;
+  }, [selectedEdgeKey, plan.cross_layer_edges, plan.layers]);
+
+  const validationErrors = useMemo(() => validatePlan(plan), [plan]);
+  const exportJson = useMemo(() => JSON.stringify(plan, null, 2), [plan]);
+
+  function updatePlan(mutator) {
+    setPlan((prev) => {
+      const base = { ...prev, created_at: prev.created_at || nowIso() };
+      const next = mutator(base);
+      return { ...next, updated_at: nowIso() };
+    });
+  }
+
+  function resetDraft() {
+    setPlan(defaultPlan());
+    setSelectedLayerId("all");
+    setSelectedPov("all");
+    setSelectedNodeId(null);
+    setSelectedEdgeKey(null);
+    setConnectFromId(null);
+    setMessage("Draft reset to defaults.");
+  }
+
+  function clearDraft() {
+    try {
+      localStorage.removeItem(LOCAL_STORAGE_KEY);
+    } catch (err) {
+      // ignore
+    }
+    resetDraft();
+  }
+
+  function addLayer() {
+    if (!addLayerForm.name.trim()) {
+      setMessage("Layer name is required.");
+      return;
+    }
+    const newLayer = {
+      id: randomId("layer"),
+      name: addLayerForm.name.trim(),
+      kind: addLayerForm.kind,
+      pov: addLayerForm.pov,
+      order: addLayerForm.order ? Number(addLayerForm.order) : plan.layers.length + 1,
+      nodes: [],
+      edges: [],
+    };
+    updatePlan((prev) => ({ ...prev, layers: [...prev.layers, newLayer] }));
+    setAddLayerForm({ name: "", kind: "module", pov: "engineering", order: "" });
+    setMessage("Layer added.");
+  }
+
+  function deleteLayer(layerId) {
+    const layer = plan.layers.find((item) => item.id === layerId);
+    if (!layer) return;
+    if (layer.nodes.length > 0) {
+      setMessage("Delete nodes in the layer before removing it.");
+      return;
+    }
+    updatePlan((prev) => ({ ...prev, layers: prev.layers.filter((item) => item.id !== layerId) }));
+    if (selectedLayerId === layerId) setSelectedLayerId("all");
+    setMessage("Layer removed.");
+  }
+
+  function addNode() {
+    const targetLayerId = addNodeForm.layerId || selectedLayer?.id;
+    if (!targetLayerId) {
+      setMessage("Select a layer before adding a node.");
+      return;
+    }
+    if (!addNodeForm.label.trim() || !addNodeForm.summary.trim()) {
+      setMessage("Node label and summary are required.");
+      return;
+    }
+    const newNode = {
+      id: randomId("node"),
+      layer_id: targetLayerId,
+      type: addNodeForm.type,
+      label: addNodeForm.label.trim(),
+      summary: addNodeForm.summary.trim(),
+      position: { x: 120, y: 120 },
+      size: { w: 240, h: 120 },
+      status: addNodeForm.status,
+      priority: addNodeForm.priority,
+      tags: [],
+      acceptance_criteria: [],
+    };
+    updatePlan((prev) => ({
+      ...prev,
+      layers: prev.layers.map((layer) =>
+        layer.id === targetLayerId ? { ...layer, nodes: [...layer.nodes, newNode] } : layer,
+      ),
+    }));
+    setSelectedNodeId(newNode.id);
+    setAddNodeForm((form) => ({ ...form, label: "", summary: "" }));
+    setMessage("Node added.");
+  }
+
+  function deleteNode(nodeId) {
+    updatePlan((prev) => {
+      const nextLayers = prev.layers.map((layer) => ({
+        ...layer,
+        nodes: layer.nodes.filter((node) => node.id !== nodeId),
+        edges: layer.edges.filter((edge) => edge.source !== nodeId && edge.target !== nodeId),
+      }));
+      const nextCross = prev.cross_layer_edges.filter((edge) => edge.source !== nodeId && edge.target !== nodeId);
+      return { ...prev, layers: nextLayers, cross_layer_edges: nextCross };
+    });
+    setSelectedNodeId(null);
+    setSelectedEdgeKey(null);
+    setMessage("Node and connected edges removed.");
+  }
+
+  function startDrag(event, node) {
+    if (connectMode.active) return;
+    event.stopPropagation();
+    const rect = event.currentTarget.getBoundingClientRect();
+    setDragState({
+      nodeId: node.id,
+      offsetX: event.clientX - rect.left,
+      offsetY: event.clientY - rect.top,
+    });
+  }
+
+  function handleNodeClick(node) {
+    if (connectMode.active) {
+      if (!connectFromId) {
+        setConnectFromId(node.id);
+        setMessage("Select a target node to create the edge.");
+        return;
+      }
+      if (connectFromId === node.id) {
+        setMessage("Source and target must be different nodes.");
+        setConnectFromId(null);
+        return;
+      }
+      const sourceNode = nodeMap.get(connectFromId);
+      const targetNode = node;
+      if (!sourceNode) {
+        setMessage("Source node not found.");
+        setConnectFromId(null);
+        return;
+      }
+      if (connectMode.scope === "layer" && sourceNode.layer_id !== targetNode.layer_id) {
+        setMessage("Layer edges require source and target in the same layer.");
+        setConnectFromId(null);
+        return;
+      }
+      const hasDuplicate = (edges) =>
+        edges.some(
+          (edge) => edge.source === sourceNode.id && edge.target === targetNode.id && edge.relation === connectMode.relation,
+        );
+      if (connectMode.scope === "cross" && hasDuplicate(plan.cross_layer_edges)) {
+        setMessage("Duplicate cross-layer edge already exists.");
+        setConnectFromId(null);
+        return;
+      }
+      if (connectMode.scope === "layer") {
+        const layer = plan.layers.find((item) => item.id === sourceNode.layer_id);
+        if (layer && hasDuplicate(layer.edges)) {
+          setMessage("Duplicate layer edge already exists.");
+          setConnectFromId(null);
+          return;
+        }
+      }
+      const newEdge = {
+        id: randomId("edge"),
+        source: sourceNode.id,
+        target: targetNode.id,
+        relation: connectMode.relation,
+        required: connectMode.required,
+      };
+      updatePlan((prev) => {
+        if (connectMode.scope === "cross") {
+          return { ...prev, cross_layer_edges: [...prev.cross_layer_edges, newEdge] };
+        }
+        return {
+          ...prev,
+          layers: prev.layers.map((layer) => {
+            if (layer.id !== sourceNode.layer_id) return layer;
+            return { ...layer, edges: [...layer.edges, newEdge] };
+          }),
+        };
+      });
+      setConnectFromId(null);
+      setMessage("Edge created.");
+      return;
+    }
+    setSelectedNodeId(node.id);
+    setSelectedEdgeKey(null);
+  }
+
+  function deleteEdge(scope, edgeId) {
+    updatePlan((prev) => {
+      if (scope === "cross") {
+        return { ...prev, cross_layer_edges: prev.cross_layer_edges.filter((edge) => edge.id !== edgeId) };
+      }
+      return {
+        ...prev,
+        layers: prev.layers.map((layer) => ({
+          ...layer,
+          edges: layer.edges.filter((edge) => edge.id !== edgeId),
+        })),
+      };
+    });
+    setSelectedEdgeKey(null);
+    setMessage("Edge removed.");
+  }
+
+  function updateEdge(scope, edgeId, patch) {
+    updatePlan((prev) => {
+      if (scope === "cross") {
+        return {
+          ...prev,
+          cross_layer_edges: prev.cross_layer_edges.map((edge) => (edge.id === edgeId ? { ...edge, ...patch } : edge)),
+        };
+      }
+      return {
+        ...prev,
+        layers: prev.layers.map((layer) => ({
+          ...layer,
+          edges: layer.edges.map((edge) => (edge.id === edgeId ? { ...edge, ...patch } : edge)),
+        })),
+      };
+    });
+  }
+
+  function updateNode(nodeId, patch) {
+    updatePlan((prev) => ({
+      ...prev,
+      layers: prev.layers.map((layer) => ({
+        ...layer,
+        nodes: layer.nodes.map((node) => (node.id === nodeId ? { ...node, ...patch } : node)),
+      })),
+    }));
+  }
+
+  function copyExport() {
+    navigator.clipboard
+      .writeText(exportJson)
+      .then(() => setMessage("Export JSON copied to clipboard."))
+      .catch(() => setMessage("Unable to copy JSON."));
+  }
+
+  function downloadExport() {
+    const name = (plan.metadata?.name || "plan").toLowerCase().replace(/\s+/g, "-");
+    const filename = `${name}-v${plan.version}.json`;
+    const blob = new Blob([exportJson], { type: "application/json" });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = filename;
+    link.click();
+    URL.revokeObjectURL(url);
+    setMessage(`Downloaded ${filename}.`);
+  }
+
+  return (
+    <main className="shell canvas-shell">
+      <header className="hero canvas-hero">
+        <div>
+          <p className="eyebrow">Planning Canvas</p>
+          <h1>Symphony Planner</h1>
+          <p className="subtle">Draft ID: <code>{plan.plan_id}</code></p>
+        </div>
+        <div className="hero-actions">
+          <button className="btn ghost" onClick={resetDraft}>Reset Draft</button>
+          <button className="btn ghost" onClick={clearDraft}>Clear Local Draft</button>
+        </div>
+      </header>
+
+      {message ? (
+        <section className="glass notice">
+          <pre>{message}</pre>
+        </section>
+      ) : null}
+
+      <section className="canvas-grid">
+        <aside className="glass canvas-panel">
+          <h2>Plan Metadata</h2>
+          <label>
+            Name
+            <input
+              value={plan.metadata.name}
+              onChange={(e) => updatePlan((prev) => ({ ...prev, metadata: { ...prev.metadata, name: e.target.value } }))}
+            />
+          </label>
+          <label>
+            Vision
+            <textarea
+              value={plan.metadata.vision}
+              onChange={(e) => updatePlan((prev) => ({ ...prev, metadata: { ...prev.metadata, vision: e.target.value } }))}
+            />
+          </label>
+          <label>
+            Goals (one per line)
+            <textarea
+              value={(plan.metadata.goals || []).join("\n")}
+              onChange={(e) =>
+                updatePlan((prev) => ({
+                  ...prev,
+                  metadata: { ...prev.metadata, goals: splitLines(e.target.value) },
+                }))
+              }
+            />
+          </label>
+
+          <h3>Filters</h3>
+          <div className="grid two">
+            <label>
+              Layer
+              <select value={selectedLayerId} onChange={(e) => setSelectedLayerId(e.target.value)}>
+                <option value="all">All layers</option>
+                {plan.layers.map((layer) => (
+                  <option key={layer.id} value={layer.id}>{layer.name}</option>
+                ))}
+              </select>
+            </label>
+            <label>
+              POV
+              <select value={selectedPov} onChange={(e) => setSelectedPov(e.target.value)}>
+                <option value="all">All POVs</option>
+                {POVS.map((pov) => (
+                  <option key={pov} value={pov}>{pov}</option>
+                ))}
+              </select>
+            </label>
+          </div>
+
+          <h3>Layers</h3>
+          <div className="stack">
+            {plan.layers.map((layer) => (
+              <div key={layer.id} className={`layer-card ${selectedLayerId === layer.id ? "active" : ""}`}>
+                <div className="row between">
+                  <strong>{layer.name}</strong>
+                  <button className="btn small ghost" onClick={() => setSelectedLayerId(layer.id)}>Select</button>
+                </div>
+                <div className="grid two">
+                  <label>
+                    Kind
+                    <select
+                      value={layer.kind}
+                      onChange={(e) =>
+                        updatePlan((prev) => ({
+                          ...prev,
+                          layers: prev.layers.map((item) =>
+                            item.id === layer.id ? { ...item, kind: e.target.value } : item,
+                          ),
+                        }))
+                      }
+                    >
+                      {LAYER_KINDS.map((kind) => (
+                        <option key={kind} value={kind}>{kind}</option>
+                      ))}
+                    </select>
+                  </label>
+                  <label>
+                    POV
+                    <select
+                      value={layer.pov}
+                      onChange={(e) =>
+                        updatePlan((prev) => ({
+                          ...prev,
+                          layers: prev.layers.map((item) =>
+                            item.id === layer.id ? { ...item, pov: e.target.value } : item,
+                          ),
+                        }))
+                      }
+                    >
+                      {POVS.map((pov) => (
+                        <option key={pov} value={pov}>{pov}</option>
+                      ))}
+                    </select>
+                  </label>
+                </div>
+                <label>
+                  Order
+                  <input
+                    value={layer.order}
+                    onChange={(e) =>
+                      updatePlan((prev) => ({
+                        ...prev,
+                        layers: prev.layers.map((item) =>
+                          item.id === layer.id ? { ...item, order: Number(e.target.value) || 1 } : item,
+                        ),
+                      }))
+                    }
+                  />
+                </label>
+                <button className="btn small" onClick={() => deleteLayer(layer.id)}>Delete Layer</button>
+              </div>
+            ))}
+          </div>
+          <label>
+            New Layer Name
+            <input
+              value={addLayerForm.name}
+              onChange={(e) => setAddLayerForm((form) => ({ ...form, name: e.target.value }))}
+              placeholder="Backend Systems"
+            />
+          </label>
+          <div className="grid two">
+            <label>
+              Kind
+              <select value={addLayerForm.kind} onChange={(e) => setAddLayerForm((form) => ({ ...form, kind: e.target.value }))}>
+                {LAYER_KINDS.map((kind) => (
+                  <option key={kind} value={kind}>{kind}</option>
+                ))}
+              </select>
+            </label>
+            <label>
+              POV
+              <select value={addLayerForm.pov} onChange={(e) => setAddLayerForm((form) => ({ ...form, pov: e.target.value }))}>
+                {POVS.map((pov) => (
+                  <option key={pov} value={pov}>{pov}</option>
+                ))}
+              </select>
+            </label>
+          </div>
+          <label>
+            Order (optional)
+            <input
+              value={addLayerForm.order}
+              onChange={(e) => setAddLayerForm((form) => ({ ...form, order: e.target.value }))}
+              placeholder={`${plan.layers.length + 1}`}
+            />
+          </label>
+          <button className="btn" onClick={addLayer}>Add Layer</button>
+
+          <h3>Add Node</h3>
+          <label>
+            Layer
+            <select
+              value={addNodeForm.layerId}
+              onChange={(e) => setAddNodeForm((form) => ({ ...form, layerId: e.target.value }))}
+            >
+              <option value="">Use selected layer</option>
+              {plan.layers.map((layer) => (
+                <option key={layer.id} value={layer.id}>{layer.name}</option>
+              ))}
+            </select>
+          </label>
+          <div className="grid two">
+            <label>
+              Type
+              <select value={addNodeForm.type} onChange={(e) => setAddNodeForm((form) => ({ ...form, type: e.target.value }))}>
+                {NODE_TYPES.map((type) => (
+                  <option key={type} value={type}>{type}</option>
+                ))}
+              </select>
+            </label>
+            <label>
+              Status
+              <select value={addNodeForm.status} onChange={(e) => setAddNodeForm((form) => ({ ...form, status: e.target.value }))}>
+                {NODE_STATUSES.map((status) => (
+                  <option key={status} value={status}>{status}</option>
+                ))}
+              </select>
+            </label>
+          </div>
+          <label>
+            Label
+            <input value={addNodeForm.label} onChange={(e) => setAddNodeForm((form) => ({ ...form, label: e.target.value }))} />
+          </label>
+          <label>
+            Summary
+            <textarea value={addNodeForm.summary} onChange={(e) => setAddNodeForm((form) => ({ ...form, summary: e.target.value }))} />
+          </label>
+          <label>
+            Priority
+            <select
+              value={addNodeForm.priority}
+              onChange={(e) => setAddNodeForm((form) => ({ ...form, priority: e.target.value }))}
+            >
+              {NODE_PRIORITIES.map((priority) => (
+                <option key={priority} value={priority}>{priority}</option>
+              ))}
+            </select>
+          </label>
+          <button className="btn" onClick={addNode}>Add Node</button>
+
+          <h3>Connect Mode</h3>
+          <label className="check">
+            <input
+              type="checkbox"
+              checked={connectMode.active}
+              onChange={(e) => {
+                setConnectMode((state) => ({ ...state, active: e.target.checked }));
+                setConnectFromId(null);
+              }}
+            />
+            Enable connect mode
+          </label>
+          <label>
+            Edge Scope
+            <select
+              value={connectMode.scope}
+              onChange={(e) => setConnectMode((state) => ({ ...state, scope: e.target.value }))}
+            >
+              <option value="layer">Layer edge</option>
+              <option value="cross">Cross-layer edge</option>
+            </select>
+          </label>
+          <label>
+            Relation
+            <select
+              value={connectMode.relation}
+              onChange={(e) => setConnectMode((state) => ({ ...state, relation: e.target.value }))}
+            >
+              {EDGE_RELATIONS.map((relation) => (
+                <option key={relation} value={relation}>{relation}</option>
+              ))}
+            </select>
+          </label>
+          <label className="check">
+            <input
+              type="checkbox"
+              checked={connectMode.required}
+              onChange={(e) => setConnectMode((state) => ({ ...state, required: e.target.checked }))}
+            />
+            Required edge
+          </label>
+          {connectFromId ? (
+            <button className="btn ghost" onClick={() => setConnectFromId(null)}>Cancel connect</button>
+          ) : null}
+        </aside>
+
+        <section className="glass canvas-board" onClick={() => setSelectedNodeId(null)}>
+          <div className="canvas-surface" ref={surfaceRef}>
+            <svg className="canvas-edges" aria-hidden="true">
+              {visibleEdges.map((entry) => {
+                const source = nodeMap.get(entry.edge.source);
+                const target = nodeMap.get(entry.edge.target);
+                if (!source || !target) return null;
+                const x1 = source.position.x + source.size.w / 2;
+                const y1 = source.position.y + source.size.h / 2;
+                const x2 = target.position.x + target.size.w / 2;
+                const y2 = target.position.y + target.size.h / 2;
+                return (
+                  <line
+                    key={`${entry.scope}:${entry.edge.id}`}
+                    x1={x1}
+                    y1={y1}
+                    x2={x2}
+                    y2={y2}
+                    className={`edge-line ${entry.scope === "cross" ? "cross" : ""}`}
+                  />
+                );
+              })}
+            </svg>
+            {visibleNodes.map((node) => (
+              <div
+                key={node.id}
+                className={`canvas-node ${selectedNodeId === node.id ? "selected" : ""} ${connectFromId === node.id ? "connect-source" : ""}`}
+                style={{ left: node.position.x, top: node.position.y, width: node.size.w, height: node.size.h }}
+                onPointerDown={(event) => startDrag(event, node)}
+                onClick={(event) => {
+                  event.stopPropagation();
+                  handleNodeClick(node);
+                }}
+              >
+                <div className="node-header">
+                  <span className="node-type">{node.type}</span>
+                  <span className="node-status">{node.status}</span>
+                </div>
+                <strong>{node.label}</strong>
+                <p>{node.summary}</p>
+              </div>
+            ))}
+          </div>
+        </section>
+
+        <aside className="glass canvas-panel">
+          <h2>Inspector</h2>
+          {selectedNode ? (
+            <div className="stack">
+              <div className="row between">
+                <strong>{selectedNode.label}</strong>
+                <button className="btn small" onClick={() => deleteNode(selectedNode.id)}>Delete</button>
+              </div>
+              <label>
+                Label
+                <input value={selectedNode.label} onChange={(e) => updateNode(selectedNode.id, { label: e.target.value })} />
+              </label>
+              <label>
+                Summary
+                <textarea
+                  value={selectedNode.summary}
+                  onChange={(e) => updateNode(selectedNode.id, { summary: e.target.value })}
+                />
+              </label>
+              <div className="grid two">
+                <label>
+                  Type
+                  <select value={selectedNode.type} onChange={(e) => updateNode(selectedNode.id, { type: e.target.value })}>
+                    {NODE_TYPES.map((type) => (
+                      <option key={type} value={type}>{type}</option>
+                    ))}
+                  </select>
+                </label>
+                <label>
+                  Status
+                  <select value={selectedNode.status} onChange={(e) => updateNode(selectedNode.id, { status: e.target.value })}>
+                    {NODE_STATUSES.map((status) => (
+                      <option key={status} value={status}>{status}</option>
+                    ))}
+                  </select>
+                </label>
+              </div>
+              <label>
+                Priority
+                <select value={selectedNode.priority || "medium"} onChange={(e) => updateNode(selectedNode.id, { priority: e.target.value })}>
+                  {NODE_PRIORITIES.map((priority) => (
+                    <option key={priority} value={priority}>{priority}</option>
+                  ))}
+                </select>
+              </label>
+              <div className="grid two">
+                <label>
+                  X
+                  <input
+                    value={selectedNode.position.x}
+                    onChange={(e) => updateNode(selectedNode.id, { position: { ...selectedNode.position, x: Number(e.target.value) || 0 } })}
+                  />
+                </label>
+                <label>
+                  Y
+                  <input
+                    value={selectedNode.position.y}
+                    onChange={(e) => updateNode(selectedNode.id, { position: { ...selectedNode.position, y: Number(e.target.value) || 0 } })}
+                  />
+                </label>
+              </div>
+              <div className="grid two">
+                <label>
+                  Width
+                  <input
+                    value={selectedNode.size.w}
+                    onChange={(e) => updateNode(selectedNode.id, { size: { ...selectedNode.size, w: Number(e.target.value) || 1 } })}
+                  />
+                </label>
+                <label>
+                  Height
+                  <input
+                    value={selectedNode.size.h}
+                    onChange={(e) => updateNode(selectedNode.id, { size: { ...selectedNode.size, h: Number(e.target.value) || 1 } })}
+                  />
+                </label>
+              </div>
+              <label>
+                Acceptance criteria (one per line)
+                <textarea
+                  value={(selectedNode.acceptance_criteria || []).join("\n")}
+                  onChange={(e) => updateNode(selectedNode.id, { acceptance_criteria: splitLines(e.target.value) })}
+                />
+              </label>
+              <label>
+                Details markdown
+                <textarea
+                  value={selectedNode.details_markdown || ""}
+                  onChange={(e) => updateNode(selectedNode.id, { details_markdown: e.target.value })}
+                />
+              </label>
+              <label>
+                Tags (comma separated)
+                <input
+                  value={(selectedNode.tags || []).join(", ")}
+                  onChange={(e) => updateNode(selectedNode.id, { tags: splitLines(e.target.value.replace(/,/g, "\n")) })}
+                />
+              </label>
+            </div>
+          ) : (
+            <p className="subtle">Select a node to edit details.</p>
+          )}
+
+          <h3>Edges</h3>
+          <div className="stack">
+            {visibleEdges.length === 0 ? (
+              <p className="subtle">No edges in current filters.</p>
+            ) : (
+              visibleEdges.map((entry) => {
+                const source = nodeMap.get(entry.edge.source);
+                const target = nodeMap.get(entry.edge.target);
+                const edgeKey = `${entry.scope}:${entry.edge.id}`;
+                return (
+                  <div key={edgeKey} className={`edge-card ${selectedEdgeKey === edgeKey ? "active" : ""}`}>
+                    <button className="edge-link" onClick={() => setSelectedEdgeKey(edgeKey)}>
+                      {source?.label || entry.edge.source} → {target?.label || entry.edge.target}
+                    </button>
+                    <span className="mono">{entry.edge.relation}</span>
+                    <button className="btn small" onClick={() => deleteEdge(entry.scope, entry.edge.id)}>Delete</button>
+                  </div>
+                );
+              })
+            )}
+          </div>
+
+          {selectedEdge?.edge ? (
+            <div className="stack">
+              <h4>Edge Details</h4>
+              <label>
+                Relation
+                <select
+                  value={selectedEdge.edge.relation}
+                  onChange={(e) => updateEdge(selectedEdge.scope, selectedEdge.edge.id, { relation: e.target.value })}
+                >
+                  {EDGE_RELATIONS.map((relation) => (
+                    <option key={relation} value={relation}>{relation}</option>
+                  ))}
+                </select>
+              </label>
+              <label className="check">
+                <input
+                  type="checkbox"
+                  checked={selectedEdge.edge.required ?? true}
+                  onChange={(e) => updateEdge(selectedEdge.scope, selectedEdge.edge.id, { required: e.target.checked })}
+                />
+                Required edge
+              </label>
+              <label>
+                Notes
+                <textarea
+                  value={selectedEdge.edge.notes || ""}
+                  onChange={(e) => updateEdge(selectedEdge.scope, selectedEdge.edge.id, { notes: e.target.value })}
+                />
+              </label>
+              <label>
+                Gates (one per line)
+                <textarea
+                  value={(selectedEdge.edge.gates || []).join("\n")}
+                  onChange={(e) => updateEdge(selectedEdge.scope, selectedEdge.edge.id, { gates: splitLines(e.target.value) })}
+                />
+              </label>
+            </div>
+          ) : null}
+
+          <h3>Export</h3>
+          {validationErrors.length > 0 ? (
+            <div className="notice error">
+              <strong>Validation issues</strong>
+              <ul>
+                {validationErrors.map((err) => (
+                  <li key={err}>{err}</li>
+                ))}
+              </ul>
+            </div>
+          ) : (
+            <p className="subtle">Plan passes schema checks and is ready to export.</p>
+          )}
+          <div className="button-row">
+            <button className="btn" disabled={validationErrors.length > 0} onClick={copyExport}>Copy JSON</button>
+            <button className="btn accent" disabled={validationErrors.length > 0} onClick={downloadExport}>Download</button>
+          </div>
+          <pre className="export-preview">{exportJson}</pre>
+        </aside>
+      </section>
+    </main>
+  );
+}
+
+function ParallelWorldsDashboardView() {
   const [dashboard, setDashboard] = useState(null);
   const [selectedBranchpoint, setSelectedBranchpoint] = useState("");
   const [loading, setLoading] = useState(true);
@@ -429,8 +1526,6 @@ export default function App() {
               />
               Skip runner
             </label>
-          </div>
-          <div className="button-row">
             <button
               className="btn"
               disabled={busy}
@@ -581,5 +1676,23 @@ export default function App() {
         </article>
       </section>
     </main>
+  );
+}
+
+export default function App() {
+  const [view, setView] = useState("canvas");
+
+  return (
+    <div className="app-root">
+      <div className="view-switch">
+        <button className={`btn small ${view === "canvas" ? "active" : "ghost"}`} onClick={() => setView("canvas")}>
+          Canvas
+        </button>
+        <button className={`btn small ${view === "dashboard" ? "active" : "ghost"}`} onClick={() => setView("dashboard")}>
+          Dashboard
+        </button>
+      </div>
+      {view === "canvas" ? <CanvasPlannerView /> : <ParallelWorldsDashboardView />}
+    </div>
   );
 }
