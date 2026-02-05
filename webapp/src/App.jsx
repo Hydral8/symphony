@@ -1413,7 +1413,8 @@ function ParallelWorldsDashboardView() {
 
   const [autopilot, setAutopilot] = useState({
     prompt: "",
-    count: "3",
+    count: "4",
+    maxCount: "4",
     fromRef: "",
     strategies: "",
     run: true,
@@ -1424,7 +1425,8 @@ function ParallelWorldsDashboardView() {
 
   const [kickoff, setKickoff] = useState({
     intent: "",
-    count: "3",
+    count: "4",
+    maxCount: "4",
     fromRef: "",
     strategies: "",
   });
@@ -1875,8 +1877,10 @@ function ParallelWorldsDashboardView() {
       } else if (refresh) {
         await loadDashboard(selectedBranchpoint, false);
       }
+      return result;
     } catch (err) {
       setError(err.message);
+      return null;
     } finally {
       setBusy(false);
     }
@@ -1930,12 +1934,171 @@ function ParallelWorldsDashboardView() {
         branchpoint: selectedBranchpoint || "",
         world: world.id,
         intent: intent.trim(),
-        count: asInt(autopilot.count),
+        max_count: asInt(autopilot.maxCount),
       },
       { switchToLatest: true },
     );
   }
 
+  async function launchWorld(worldId, popupWindow = null) {
+    const result = await postAction(
+      "launch",
+      {
+        branchpoint: selectedBranchpoint || "",
+        world: worldId,
+      },
+      { refresh: false },
+    );
+    const url = String(result?.url || "").trim();
+    if (!url) {
+      if (popupWindow && !popupWindow.closed) {
+        popupWindow.close();
+      }
+      return;
+    }
+    if (popupWindow && !popupWindow.closed) {
+      popupWindow.location.href = url;
+      return;
+    }
+    window.open(url, "_blank", "noopener,noreferrer");
+  }
+
+  async function runOrPlayAndLaunch(mode, worldId) {
+    let popupWindow = null;
+    try {
+      popupWindow = window.open("about:blank", "_blank", "noopener,noreferrer");
+      if (popupWindow && popupWindow.document) {
+        popupWindow.document.title = "Launching App";
+        popupWindow.document.body.innerHTML = "<p style='font-family:sans-serif;padding:16px'>Preparing app...</p>";
+      }
+    } catch (err) {
+      popupWindow = null;
+    }
+
+    const isPlay = mode === "play";
+    const action = isPlay ? "play" : "run";
+    const payload = isPlay
+      ? {
+          branchpoint: selectedBranchpoint || "",
+          worlds: worldId,
+          render_command: playForm.renderCommand.trim() || null,
+          timeout: asInt(playForm.timeout),
+          preview_lines: asInt(playForm.previewLines),
+        }
+      : {
+          branchpoint: selectedBranchpoint || "",
+          worlds: worldId,
+          skip_codex: runForm.skipCodex,
+          skip_runner: runForm.skipRunner,
+        };
+
+    const result = await postAction(action, payload);
+    if (!result || result.ok === false) {
+      if (popupWindow && !popupWindow.closed) {
+        popupWindow.close();
+      }
+      return;
+    }
+    await launchWorld(worldId, popupWindow);
+  }
+
+  function toggleCompareWorld(worldId) {
+    setCompareWorldIds((prev) => {
+      if (prev.includes(worldId)) {
+        return prev.filter((id) => id !== worldId);
+      }
+      if (prev.length >= 2) {
+        return [prev[1], worldId];
+      }
+      return [...prev, worldId];
+    });
+  }
+
+  function buildRenderViewUrl(worldIds) {
+    const params = new URLSearchParams();
+    params.set("view", "render");
+    const bp = selectedBranchpoint || dashboard?.selected_branchpoint || "";
+    if (bp) params.set("branchpoint", bp);
+    const ids = (worldIds || []).map((id) => String(id || "").trim()).filter(Boolean).slice(0, 2);
+    if (ids.length) params.set("worlds", ids.join(","));
+    return `${window.location.pathname}?${params.toString()}`;
+  }
+
+  function openRenderView(worldIds = compareWorldIds, inNewTab = false) {
+    const ids = (worldIds || []).map((id) => String(id || "").trim()).filter(Boolean).slice(0, 2);
+    if (ids.length === 0) {
+      setError("Select at least one world to open full render view.");
+      return;
+    }
+    const url = buildRenderViewUrl(ids);
+    if (inNewTab) {
+      window.open(url, "_blank", "noopener,noreferrer");
+      return;
+    }
+    setCompareWorldIds(ids);
+    setRenderViewOpen(true);
+    window.history.pushState({}, "", url);
+  }
+
+  function closeRenderView() {
+    setRenderViewOpen(false);
+    const bp = selectedBranchpoint || dashboard?.selected_branchpoint || "";
+    const url = bp ? `${window.location.pathname}?branchpoint=${encodeURIComponent(bp)}` : window.location.pathname;
+    window.history.pushState({}, "", url);
+  }
+
+  async function mergeWorld(world) {
+    const defaultTarget = String(branchpoint?.base_branch || "main").trim() || "main";
+    const chosen = window.prompt(`Merge target branch for ${world.branch}:`, defaultTarget);
+    if (chosen === null) return;
+    const target = String(chosen || "").trim() || defaultTarget;
+    await postAction("select", {
+      branchpoint: selectedBranchpoint || "",
+      world: world.id,
+      merge: true,
+      target_branch: target,
+    });
+  }
+
+  useEffect(() => {
+    if (!renderViewOpen) return;
+    const bp = selectedBranchpoint || dashboard?.selected_branchpoint || "";
+    if (!bp || compareWorldIds.length === 0) return;
+
+    let cancelled = false;
+    const loadLogs = async () => {
+      const next = {};
+      for (const wid of compareWorldIds) {
+        try {
+          const payload = await readJson(
+            `${API_BASE}/api/log?kind=render&branchpoint=${encodeURIComponent(bp)}&world=${encodeURIComponent(wid)}&tail=500`,
+          );
+          if (!cancelled) {
+            next[wid] = {
+              text: payload.text || "",
+              path: payload.path || "",
+            };
+          }
+        } catch (err) {
+          if (!cancelled) {
+            next[wid] = { text: `Unable to load render log: ${err.message}`, path: "" };
+          }
+        }
+      }
+      if (!cancelled) {
+        setRenderViewLogs(next);
+      }
+    };
+
+    loadLogs();
+    return () => {
+      cancelled = true;
+    };
+  }, [renderViewOpen, compareWorldIds, selectedBranchpoint, dashboard]);
+
+  const compareRows = compareWorldIds
+    .map((wid) => worldRows.find((row) => row.world?.id === wid))
+    .filter(Boolean);
   if (loading) {
     return (
       <main className="shell">
@@ -2325,13 +2488,23 @@ function ParallelWorldsDashboardView() {
           </label>
           <div className="grid two">
             <label>
-              World count
+              Exact world count (optional)
               <input
                 value={autopilot.count}
                 onChange={(e) =>
                   setAutopilot((s) => ({ ...s, count: e.target.value }))
                 }
-                placeholder="3"
+                placeholder="4"
+              />
+            </label>
+            <label>
+              Max world count (model auto-select)
+              <input
+                value={autopilot.maxCount}
+                onChange={(e) =>
+                  setAutopilot((s) => ({ ...s, maxCount: e.target.value }))
+                }
+                placeholder="4"
               />
             </label>
             <label>
@@ -2345,6 +2518,7 @@ function ParallelWorldsDashboardView() {
               />
             </label>
           </div>
+          <p className="subtle">Exact count is authoritative for new branchpoints. It does not change existing branchpoints.</p>
           <label>
             Strategies (optional, one per line: <code>name::notes</code>)
             <textarea
@@ -2408,6 +2582,7 @@ function ParallelWorldsDashboardView() {
                 {
                   prompt: autopilot.prompt.trim(),
                   count: asInt(autopilot.count),
+                  max_count: asInt(autopilot.maxCount),
                   from_ref: autopilot.fromRef.trim() || null,
                   strategies: parseStrategies(autopilot.strategies),
                   run: autopilot.run,
@@ -2453,12 +2628,23 @@ function ParallelWorldsDashboardView() {
           </label>
           <div className="grid two">
             <label>
-              Count
+              Exact world count (optional)
               <input
                 value={kickoff.count}
                 onChange={(e) =>
                   setKickoff((s) => ({ ...s, count: e.target.value }))
                 }
+                placeholder="4"
+              />
+            </label>
+            <label>
+              Max world count (model auto-select)
+              <input
+                value={kickoff.maxCount}
+                onChange={(e) =>
+                  setKickoff((s) => ({ ...s, maxCount: e.target.value }))
+                }
+                placeholder="4"
               />
             </label>
             <label>
@@ -2472,6 +2658,7 @@ function ParallelWorldsDashboardView() {
               />
             </label>
           </div>
+          <p className="subtle">Exact count is authoritative for new branchpoints. It does not change existing branchpoints.</p>
           <label>
             Strategies (optional)
             <textarea
@@ -2491,6 +2678,7 @@ function ParallelWorldsDashboardView() {
                 {
                   intent: kickoff.intent.trim(),
                   count: asInt(kickoff.count),
+                  max_count: asInt(kickoff.maxCount),
                   from_ref: kickoff.fromRef.trim() || null,
                   strategies: parseStrategies(kickoff.strategies),
                 },
@@ -2757,6 +2945,20 @@ function ParallelWorldsDashboardView() {
                       Play
                     </button>
                     <button
+                      className="btn small ghost"
+                      disabled={busy}
+                      onClick={() => runOrPlayAndLaunch("run", world.id)}
+                    >
+                      Run + Open
+                    </button>
+                    <button
+                      className="btn small ghost"
+                      disabled={busy}
+                      onClick={() => runOrPlayAndLaunch("play", world.id)}
+                    >
+                      Play + Open
+                    </button>
+                    <button
                       className="btn small"
                       disabled={busy}
                       onClick={() =>
@@ -2770,11 +2972,34 @@ function ParallelWorldsDashboardView() {
                       Select
                     </button>
                     <button
+                      className="btn small primary"
+                      disabled={busy}
+                      onClick={() => mergeWorld(world)}
+                    >
+                      Select + Merge
+                    </button>
+                    <button
                       className="btn small accent"
                       disabled={busy}
                       onClick={() => forkFromWorld(world)}
                     >
                       Fork
+                    </button>
+                  </div>
+                  <div className="button-row">
+                    <button
+                      className="btn ghost small"
+                      disabled={busy}
+                      onClick={() => toggleCompareWorld(world.id)}
+                    >
+                      {compareWorldIds.includes(world.id) ? "Remove From Compare" : "Add To Compare"}
+                    </button>
+                    <button
+                      className="btn ghost small"
+                      disabled={busy}
+                      onClick={() => openRenderView([world.id], false)}
+                    >
+                      Full Render
                     </button>
                   </div>
                   <div className="button-row">
