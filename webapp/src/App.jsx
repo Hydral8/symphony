@@ -27,6 +27,7 @@ function parentPath(rawPath) {
 function statusTone(status) {
   if (status === "pass") return "pass";
   if (status === "fail" || status === "error") return "fail";
+  if (status === "running" || status === "ran") return "run";
   if (status === "played") return "play";
   if (status === "ready") return "ready";
   return "muted";
@@ -51,6 +52,11 @@ function sleep(ms) {
   return new Promise((resolve) => {
     window.setTimeout(resolve, ms);
   });
+}
+
+function apiUrl(path) {
+  const base = String(API_BASE || "").replace(/\/+$/, "");
+  return `${base}${path}`;
 }
 
 export default function App() {
@@ -89,6 +95,7 @@ export default function App() {
 
   const [autopilot, setAutopilot] = useState({
     prompt: "",
+    count: "",
     maxCount: "4",
     fromRef: "",
     strategies: "",
@@ -100,6 +107,7 @@ export default function App() {
 
   const [kickoff, setKickoff] = useState({
     intent: "",
+    count: "",
     maxCount: "4",
     fromRef: "",
     strategies: "",
@@ -117,12 +125,16 @@ export default function App() {
     timeout: "",
     previewLines: "",
   });
+  const [compareWorldIds, setCompareWorldIds] = useState([]);
+  const [renderViewOpen, setRenderViewOpen] = useState(false);
+  const [renderViewLogs, setRenderViewLogs] = useState({});
 
-  async function loadDashboard(branchpoint = selectedBranchpoint, initial = false) {
+  async function loadDashboard(branchpoint = selectedBranchpoint, initial = false, opts = {}) {
+    const { silent = false } = opts;
     const query = branchpoint ? `?branchpoint=${encodeURIComponent(branchpoint)}` : "";
     if (initial) setLoading(true);
-    else setRefreshing(true);
-    setError("");
+    else if (!silent) setRefreshing(true);
+    if (!silent) setError("");
     try {
       const payload = await readJson(`${API_BASE}/api/dashboard${query}`);
       setDashboard(payload);
@@ -133,15 +145,29 @@ export default function App() {
         setSelectedBranchpoint(payload.selected_branchpoint || branchpoint);
       }
     } catch (err) {
-      setError(err.message);
+      if (!silent) setError(err.message);
     } finally {
-      setLoading(false);
-      setRefreshing(false);
+      if (initial) setLoading(false);
+      if (!silent) setRefreshing(false);
     }
   }
 
   useEffect(() => {
-    loadDashboard("", true);
+    const params = new URLSearchParams(window.location.search);
+    const bp = params.get("branchpoint") || "";
+    const rawWorlds = params.get("worlds") || "";
+    const initialWorlds = rawWorlds
+      .split(",")
+      .map((item) => item.trim())
+      .filter(Boolean)
+      .slice(0, 2);
+    if (initialWorlds.length > 0) {
+      setCompareWorldIds(initialWorlds);
+    }
+    if ((params.get("view") || "").toLowerCase() === "render") {
+      setRenderViewOpen(true);
+    }
+    loadDashboard(bp, true);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
@@ -178,6 +204,21 @@ export default function App() {
 
   const effectiveProjectBasePath = projectForm.basePath.trim() || parentPath(activeRepo);
   const canCreateProject = Boolean(projectForm.path.trim() || projectForm.name.trim());
+  const dagRows = worldRows
+    .map((row) => {
+      const world = row.world || {};
+      const live = row.live || {};
+      return {
+        id: world.id || "",
+        name: world.name || "world",
+        branch: world.branch || "",
+        status: world.status || "ready",
+        head: live.head || "n/a",
+        commits: Number.isInteger(live.ahead_commits) ? live.ahead_commits : 0,
+        dirty: Number.isInteger(live.dirty_files) ? live.dirty_files : 0,
+      };
+    })
+    .sort((a, b) => String(a.name).localeCompare(String(b.name)));
 
   async function postAction(action, payload, opts = {}) {
     const { refresh = true, switchToLatest = false, resetBranchpoint = false } = opts;
@@ -193,12 +234,18 @@ export default function App() {
 
       if (result.job_id) {
         const jobId = String(result.job_id);
+        let lastDashboardRefreshAt = 0;
         setActionOutput(`Running ${action}...`);
         while (true) {
           const status = await readJson(`${API_BASE}/api/action_status?job=${encodeURIComponent(jobId)}`);
           const liveText = status.log || status?.result?.output || "";
           if (liveText) {
             setActionOutput(liveText);
+          }
+          const now = Date.now();
+          if (now - lastDashboardRefreshAt >= 1700) {
+            await loadDashboard("", false, { silent: true });
+            lastDashboardRefreshAt = now;
           }
           if (status.status === "completed" || status.status === "failed") {
             result = status.result || {};
@@ -321,6 +368,104 @@ export default function App() {
     );
   }
 
+  function toggleCompareWorld(worldId) {
+    setCompareWorldIds((prev) => {
+      if (prev.includes(worldId)) {
+        return prev.filter((id) => id !== worldId);
+      }
+      if (prev.length >= 2) {
+        return [prev[1], worldId];
+      }
+      return [...prev, worldId];
+    });
+  }
+
+  function buildRenderViewUrl(worldIds) {
+    const params = new URLSearchParams();
+    params.set("view", "render");
+    const bp = selectedBranchpoint || dashboard?.selected_branchpoint || "";
+    if (bp) params.set("branchpoint", bp);
+    const ids = (worldIds || []).map((id) => String(id || "").trim()).filter(Boolean).slice(0, 2);
+    if (ids.length) params.set("worlds", ids.join(","));
+    return `${window.location.pathname}?${params.toString()}`;
+  }
+
+  function openRenderView(worldIds = compareWorldIds, inNewTab = false) {
+    const ids = (worldIds || []).map((id) => String(id || "").trim()).filter(Boolean).slice(0, 2);
+    if (ids.length === 0) {
+      setError("Select at least one world to open full render view.");
+      return;
+    }
+    const url = buildRenderViewUrl(ids);
+    if (inNewTab) {
+      window.open(url, "_blank", "noopener,noreferrer");
+      return;
+    }
+    setCompareWorldIds(ids);
+    setRenderViewOpen(true);
+    window.history.pushState({}, "", url);
+  }
+
+  function closeRenderView() {
+    setRenderViewOpen(false);
+    const bp = selectedBranchpoint || dashboard?.selected_branchpoint || "";
+    const url = bp ? `${window.location.pathname}?branchpoint=${encodeURIComponent(bp)}` : window.location.pathname;
+    window.history.pushState({}, "", url);
+  }
+
+  async function mergeWorld(world) {
+    const defaultTarget = String(branchpoint?.base_branch || "main").trim() || "main";
+    const chosen = window.prompt(`Merge target branch for ${world.branch}:`, defaultTarget);
+    if (chosen === null) return;
+    const target = String(chosen || "").trim() || defaultTarget;
+    await postAction("select", {
+      branchpoint: selectedBranchpoint || "",
+      world: world.id,
+      merge: true,
+      target_branch: target,
+    });
+  }
+
+  useEffect(() => {
+    if (!renderViewOpen) return;
+    const bp = selectedBranchpoint || dashboard?.selected_branchpoint || "";
+    if (!bp || compareWorldIds.length === 0) return;
+
+    let cancelled = false;
+    const loadLogs = async () => {
+      const next = {};
+      for (const wid of compareWorldIds) {
+        try {
+          const payload = await readJson(
+            `${API_BASE}/api/log?kind=render&branchpoint=${encodeURIComponent(bp)}&world=${encodeURIComponent(wid)}&tail=500`,
+          );
+          if (!cancelled) {
+            next[wid] = {
+              text: payload.text || "",
+              path: payload.path || "",
+            };
+          }
+        } catch (err) {
+          if (!cancelled) {
+            next[wid] = { text: `Unable to load render log: ${err.message}`, path: "" };
+          }
+        }
+      }
+      if (!cancelled) {
+        setRenderViewLogs(next);
+      }
+    };
+
+    loadLogs();
+    return () => {
+      cancelled = true;
+    };
+  }, [renderViewOpen, compareWorldIds, selectedBranchpoint, dashboard]);
+
+  const compareRows = compareWorldIds
+    .map((wid) => worldRows.find((row) => row.world?.id === wid))
+    .filter(Boolean);
+
   if (loading) {
     return (
       <main className="shell">
@@ -328,6 +473,94 @@ export default function App() {
           <h1>Parallel Worlds Dashboard</h1>
           <p>Loading repository state...</p>
         </section>
+      </main>
+    );
+  }
+
+  if (renderViewOpen) {
+    return (
+      <main className="shell render-view-shell">
+        <section className="glass render-view-header">
+          <div>
+            <p className="eyebrow">Render Review</p>
+            <h1>Full Render View</h1>
+            <p className="subtle">
+              Branchpoint: <code>{branchpointLabel}</code>
+            </p>
+          </div>
+          <div className="hero-actions">
+            <button className="btn ghost" onClick={() => closeRenderView()}>
+              Back to Dashboard
+            </button>
+            <button className="btn ghost" onClick={() => openRenderView(compareWorldIds, true)}>
+              Open in New Tab
+            </button>
+            <button className="btn ghost" disabled={refreshing || busy} onClick={() => loadDashboard(selectedBranchpoint, false)}>
+              {refreshing ? "Refreshing..." : "Refresh"}
+            </button>
+          </div>
+        </section>
+
+        {error ? (
+          <section className="glass notice error">
+            <strong>Error:</strong> {error}
+          </section>
+        ) : null}
+
+        {compareRows.length === 0 ? (
+          <section className="glass panel">
+            <p className="subtle">No worlds selected for render view. Go back and choose one or two worlds.</p>
+          </section>
+        ) : (
+          <section className={`render-compare-grid ${compareRows.length === 1 ? "single" : ""}`}>
+            {compareRows.map((row) => {
+              const world = row.world;
+              const render = row.render;
+              const assets = Array.isArray(render?.visual_assets) ? render.visual_assets : [];
+              const log = renderViewLogs[world.id] || { text: "", path: "" };
+              return (
+                <article key={`render-view-${world.id}`} className="glass render-compare-card">
+                  <header className="render-compare-head">
+                    <h2>
+                      {String(world.index).padStart(2, "0")} {world.name}
+                    </h2>
+                    <span className={`status ${statusTone(world.status)}`}>{world.status || "ready"}</span>
+                  </header>
+                  <p className="mono">{world.branch}</p>
+                  <p className="subtle">Render exit: {render ? render.exit_code ?? "n/a" : "n/a"} · Duration: {fmtDuration(render?.duration_sec)}</p>
+
+                  {assets.length === 0 ? (
+                    <div className="render-empty">No visual artifacts found. Use Play to generate visuals.</div>
+                  ) : (
+                    <div className="render-asset-stack">
+                      {assets.map((asset) => (
+                        <a
+                          key={`${world.id}-asset-full-${asset.index}`}
+                          className="render-asset-link"
+                          href={apiUrl(asset.url)}
+                          target="_blank"
+                          rel="noreferrer"
+                        >
+                          {asset.kind === "video" ? (
+                            <video className="render-asset-media" src={apiUrl(asset.url)} controls preload="metadata" />
+                          ) : (
+                            <img className="render-asset-media" src={apiUrl(asset.url)} alt={`Render artifact ${asset.index + 1}`} loading="lazy" />
+                          )}
+                          <span>Open artifact {asset.index + 1}</span>
+                        </a>
+                      ))}
+                    </div>
+                  )}
+
+                  <div className="render-log-panel">
+                    <p className="subtle mono">{log.path || render?.log_path || ""}</p>
+                    <pre>{log.text || "No render log loaded."}</pre>
+                  </div>
+                </article>
+              );
+            })}
+          </section>
+        )}
       </main>
     );
   }
@@ -552,6 +785,14 @@ export default function App() {
           </label>
           <div className="grid two">
             <label>
+              Exact world count (optional)
+              <input
+                value={autopilot.count}
+                onChange={(e) => setAutopilot((s) => ({ ...s, count: e.target.value }))}
+                placeholder="4"
+              />
+            </label>
+            <label>
               Max world count (model auto-select)
               <input
                 value={autopilot.maxCount}
@@ -568,7 +809,7 @@ export default function App() {
               />
             </label>
           </div>
-          <p className="subtle">The model chooses branch count from 1..max.</p>
+          <p className="subtle">If exact count is set, it is used directly; otherwise the model chooses from 1..max.</p>
           <label>
             Strategies (optional, one per line: <code>name::notes</code>)
             <textarea
@@ -619,6 +860,7 @@ export default function App() {
                 "autopilot",
                 {
                   prompt: autopilot.prompt.trim(),
+                  count: asInt(autopilot.count),
                   max_count: asInt(autopilot.maxCount),
                   from_ref: autopilot.fromRef.trim() || null,
                   strategies: parseStrategies(autopilot.strategies),
@@ -660,6 +902,10 @@ export default function App() {
           </label>
           <div className="grid two">
             <label>
+              Exact world count (optional)
+              <input value={kickoff.count} onChange={(e) => setKickoff((s) => ({ ...s, count: e.target.value }))} placeholder="4" />
+            </label>
+            <label>
               Max world count (model auto-select)
               <input value={kickoff.maxCount} onChange={(e) => setKickoff((s) => ({ ...s, maxCount: e.target.value }))} placeholder="4" />
             </label>
@@ -672,7 +918,7 @@ export default function App() {
               />
             </label>
           </div>
-          <p className="subtle">The model chooses branch count from 1..max.</p>
+          <p className="subtle">If exact count is set, it is used directly; otherwise the model chooses from 1..max.</p>
           <label>
             Strategies (optional)
             <textarea
@@ -689,6 +935,7 @@ export default function App() {
                 "kickoff",
                 {
                   intent: kickoff.intent.trim(),
+                  count: asInt(kickoff.count),
                   max_count: asInt(kickoff.maxCount),
                   from_ref: kickoff.fromRef.trim() || null,
                   strategies: parseStrategies(kickoff.strategies),
@@ -787,12 +1034,56 @@ export default function App() {
         </article>
       </section>
 
+      <section className="glass dag-panel">
+        <div className="dag-header">
+          <h2>Branchpoint DAG</h2>
+          <p className="subtle">Live view of source and branch heads for the selected branchpoint.</p>
+        </div>
+        <div className="dag-root-node">
+          <span className="dag-dot root" />
+          <div>
+            <p className="dag-node-title">source</p>
+            <p className="dag-node-meta mono">{branchpoint?.source_ref || "main"} ({branchpoint?.base_branch || "base"})</p>
+          </div>
+        </div>
+        {dagRows.length === 0 ? (
+          <p className="subtle">No world branches yet for this branchpoint.</p>
+        ) : (
+          <div className="dag-branches">
+            {dagRows.map((item) => (
+              <article key={`dag-${item.id || item.branch}`} className={`dag-branch tone-${statusTone(item.status)}`}>
+                <span className="dag-link" />
+                <div className="dag-branch-head">
+                  <span className={`status ${statusTone(item.status)}`}>{item.status}</span>
+                  <strong>{item.name}</strong>
+                </div>
+                <p className="mono">{item.branch}</p>
+                <p className="dag-node-meta">HEAD {item.head} | commits {item.commits} | dirty {item.dirty}</p>
+              </article>
+            ))}
+          </div>
+        )}
+      </section>
+
       <section className="glass worlds-panel">
         <div className="worlds-header">
-          <h2>World Blocks</h2>
-          <p className="subtle">
-            Click <strong>Fork</strong> on any block to split a new branchpoint from that world branch.
-          </p>
+          <div>
+            <h2>World Blocks</h2>
+            <p className="subtle">
+              Click <strong>Fork</strong> on any block to split a new branchpoint from that world branch.
+            </p>
+          </div>
+          <div className="button-row">
+            <button className="btn ghost small" disabled={compareWorldIds.length === 0} onClick={() => openRenderView(compareWorldIds, false)}>
+              Full Render View
+            </button>
+            <button className="btn ghost small" disabled={compareWorldIds.length === 0} onClick={() => openRenderView(compareWorldIds, true)}>
+              Full View in New Tab
+            </button>
+            <button className="btn ghost small" disabled={compareWorldIds.length === 0} onClick={() => setCompareWorldIds([])}>
+              Clear Compare
+            </button>
+          </div>
         </div>
         {worldRows.length === 0 ? (
           <p className="subtle">No worlds yet. Create one with Kickoff or Prompt Agent.</p>
@@ -803,6 +1094,13 @@ export default function App() {
               const run = row.run;
               const codex = row.codex;
               const render = row.render;
+              const live = row.live || {};
+              const liveCommits = Number.isInteger(live.ahead_commits) ? live.ahead_commits : "n/a";
+              const liveHead = live.head || "n/a";
+              const liveDirty = Number.isInteger(live.dirty_files) ? live.dirty_files : "n/a";
+              const sourceHead = live.source_head || "source";
+              const commitNodes = Array.isArray(live.commit_nodes) ? live.commit_nodes : [];
+              const nodesTruncated = Boolean(live.commit_nodes_truncated);
               return (
                 <article key={world.id} className={`world-card tone-${statusTone(world.status)}`}>
                   <div className="world-head">
@@ -818,6 +1116,39 @@ export default function App() {
                     <span>Run: {run ? run.exit_code ?? "n/a" : "n/a"}</span>
                     <span>Render: {render ? render.exit_code ?? "n/a" : "n/a"}</span>
                     <span>Run time: {fmtDuration(run?.duration_sec)}</span>
+                    <span>Commits: {liveCommits}</span>
+                    <span>HEAD: {liveHead}</span>
+                    <span>Dirty: {liveDirty}</span>
+                  </div>
+                  <div className="timeline-wrap">
+                    <p className="timeline-title">Branch timeline</p>
+                    <ol className="commit-tree">
+                      <li className="commit-node root">
+                        <span className="commit-dot" />
+                        <code className="commit-sha">{sourceHead}</code>
+                        <span className="commit-subject">source ({branchpoint?.source_ref || "base"})</span>
+                      </li>
+                      {commitNodes.length === 0 ? (
+                        <li className="commit-node empty">
+                          <span className="commit-dot" />
+                          <span className="commit-subject">no new commits yet</span>
+                        </li>
+                      ) : (
+                        commitNodes.map((node, idx) => (
+                          <li key={`${world.id}-node-${idx}-${node.sha || "sha"}`} className="commit-node">
+                            <span className="commit-dot" />
+                            <code className="commit-sha">{node.sha || "n/a"}</code>
+                            <span className="commit-subject">{node.subject || "commit"}</span>
+                          </li>
+                        ))
+                      )}
+                      {nodesTruncated ? (
+                        <li className="commit-node empty">
+                          <span className="commit-dot" />
+                          <span className="commit-subject">... more commits not shown</span>
+                        </li>
+                      ) : null}
+                    </ol>
                   </div>
                   <div className="button-row">
                     <button className="btn small" disabled={busy} onClick={() => postAction("run", { branchpoint: selectedBranchpoint || "", worlds: world.id })}>
@@ -829,8 +1160,27 @@ export default function App() {
                     <button className="btn small" disabled={busy} onClick={() => postAction("select", { branchpoint: selectedBranchpoint || "", world: world.id, merge: false })}>
                       Select
                     </button>
+                    <button className="btn small primary" disabled={busy} onClick={() => mergeWorld(world)}>
+                      Select + Merge
+                    </button>
                     <button className="btn small accent" disabled={busy} onClick={() => forkFromWorld(world)}>
                       Fork
+                    </button>
+                  </div>
+                  <div className="button-row">
+                    <button
+                      className="btn ghost small"
+                      disabled={busy}
+                      onClick={() => toggleCompareWorld(world.id)}
+                    >
+                      {compareWorldIds.includes(world.id) ? "Remove From Compare" : "Add To Compare"}
+                    </button>
+                    <button
+                      className="btn ghost small"
+                      disabled={busy}
+                      onClick={() => openRenderView([world.id], false)}
+                    >
+                      Full Render
                     </button>
                   </div>
                   <div className="button-row">

@@ -41,6 +41,8 @@ Then edit `parallel_worlds.json` for your repo:
 - `runner.command` for tests/checks
 - `codex.enabled` and `codex.command` if using Codex stage
 - `render.command` if using `play`
+- `execution.workspace_mode: "worktree"` for true parallel branch execution
+- `execution.max_parallel_worlds` to cap concurrent branch runs
 
 ## 2) Start web app (recommended dev mode)
 

@@ -30,6 +30,52 @@ from .strategy import choose_strategies, make_branchpoint_id
 from .worlds import add_worktree, ensure_base_branch, ensure_worlds_dir, matches_world_filter, resolve_start_ref, write_world_notes
 
 
+def _autocommit_world_changes(world: Dict[str, Any], branchpoint_id: str, prefix: str) -> Optional[str]:
+    worktree = world.get("worktree", "")
+    status = git(["status", "--porcelain"], cwd=worktree, check=False)
+    lines = (status.stdout or "").splitlines()
+    paths: List[str] = []
+    for line in lines:
+        text = line.rstrip()
+        if len(text) < 4:
+            continue
+        path_part = text[3:]
+        if " -> " in path_part:
+            path_part = path_part.split(" -> ", 1)[1]
+        path = path_part.strip()
+        if not path:
+            continue
+        if path.startswith(".parallel_worlds/"):
+            continue
+        if path in {"report.md", "play.md"}:
+            continue
+        paths.append(path)
+
+    unique_paths = sorted(set(paths))
+    if not unique_paths:
+        return None
+
+    git(["add", "-A", "--"] + unique_paths, cwd=worktree, check=True)
+    message = f"{prefix}: {branchpoint_id} {world.get('name', world.get('id', 'world'))}"
+    commit = git(
+        [
+            "-c",
+            "user.name=Parallel Worlds",
+            "-c",
+            "user.email=parallel-worlds@local",
+            "commit",
+            "-m",
+            message,
+        ],
+        cwd=worktree,
+        check=False,
+    )
+    if commit.returncode != 0:
+        return None
+    head = git(["rev-parse", "HEAD"], cwd=worktree, check=False)
+    return (head.stdout or "").strip() or None
+
+
 def create_project(
     project_path: str,
     project_name: Optional[str],
@@ -307,6 +353,8 @@ def _apply_run_result(
     world: Dict[str, Any],
     codex_result: Optional[Dict[str, Any]],
     run_result: Dict[str, Any],
+    commit_mode: str,
+    commit_prefix: str,
 ) -> None:
     if codex_result:
         save_codex_run(repo, bp_id, world["id"], codex_result)
@@ -335,6 +383,15 @@ def _apply_run_result(
         codex_failed = (codex_result.get("exit_code") not in (0, None)) or bool(codex_result.get("error"))
         if codex_failed and run_result.get("exit_code") is None:
             world["status"] = "error"
+        commit_count = int(codex_result.get("commit_count") or 0)
+        if commit_mode == "series" and commit_count <= 0:
+            print(
+                f"codex {world['id']}: no intermediate commits detected; applying fallback commit"
+            )
+            commit_sha = _autocommit_world_changes(world, bp_id, commit_prefix)
+            if commit_sha:
+                world["last_commit"] = commit_sha
+                print(f"committed {world['id']}: {commit_sha}")
 
     save_world(repo, world)
     print(
@@ -361,6 +418,8 @@ def run_branchpoint(
     timeout_sec = int(cfg["runner"]["timeout_sec"])
     codex_cfg = cfg.get("codex", {})
     codex_enabled = bool(codex_cfg.get("enabled", False)) and not skip_codex
+    commit_mode = str(codex_cfg.get("commit_mode", "series")).strip().lower() or "series"
+    commit_prefix = str(codex_cfg.get("commit_prefix", "pw-step")).strip() or "pw-step"
 
     selected_worlds = resolve_worlds_for_branchpoint(repo, branchpoint, world_filters)
     available_skills: List[str] = []
@@ -371,6 +430,8 @@ def run_branchpoint(
 
     if worker_count <= 1:
         for world in selected_worlds:
+            world["status"] = "running"
+            save_world(repo, world)
             _, codex_result, run_result = _run_world_pipeline(
                 world=world,
                 branchpoint=branchpoint,
@@ -381,8 +442,19 @@ def run_branchpoint(
                 timeout_sec=timeout_sec,
                 skip_runner=skip_runner,
             )
-            _apply_run_result(repo, bp_id, world, codex_result, run_result)
+            _apply_run_result(
+                repo,
+                bp_id,
+                world,
+                codex_result,
+                run_result,
+                commit_mode=commit_mode,
+                commit_prefix=commit_prefix,
+            )
     else:
+        for world in selected_worlds:
+            world["status"] = "running"
+            save_world(repo, world)
         print(f"running {len(selected_worlds)} worlds with parallelism={worker_count}")
         with ThreadPoolExecutor(max_workers=worker_count) as executor:
             futures = {
@@ -401,7 +473,15 @@ def run_branchpoint(
             }
             for future in as_completed(futures):
                 world, codex_result, run_result = future.result()
-                _apply_run_result(repo, bp_id, world, codex_result, run_result)
+                _apply_run_result(
+                    repo,
+                    bp_id,
+                    world,
+                    codex_result,
+                    run_result,
+                    commit_mode=commit_mode,
+                    commit_prefix=commit_prefix,
+                )
 
     branchpoint["status"] = "ran"
     branchpoint["last_ran_at"] = now_utc()

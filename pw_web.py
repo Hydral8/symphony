@@ -17,7 +17,7 @@ from datetime import datetime
 from contextlib import contextmanager, redirect_stderr, redirect_stdout
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any, Callable, Dict, List, Optional, Tuple
-from urllib.parse import parse_qs, urlparse
+from urllib.parse import parse_qs, urlencode, urlparse
 
 import pw
 from parallel_worlds.common import branch_exists, git
@@ -299,7 +299,20 @@ def _resolve_world_count(
     if max_count is None:
         return None, ""
 
-    return _model_world_count(repo, config_path, intent, max_count, cli_strategies)
+    try:
+        return _model_world_count(repo, config_path, intent, max_count, cli_strategies)
+    except ValueError as exc:
+        fallback_default = 3
+        try:
+            cfg = pw.load_config(config_path)
+            fallback_default = int(cfg.get("default_world_count", 3) or 3)
+        except Exception:
+            fallback_default = 3
+        fallback = max(1, min(max_count, fallback_default))
+        message = str(exc).strip()
+        if "codex.command" in message:
+            return fallback, f"codex auto-selection unavailable; using default world count={fallback} (max={max_count})"
+        return fallback, f"auto-selection unavailable ({message}); using default world count={fallback} (max={max_count})"
 
 
 def _pick_folder_path(prompt: str, default_path: Optional[str]) -> Tuple[bool, Optional[str], str]:
@@ -393,6 +406,13 @@ def _tail_text(path: str, lines: int) -> str:
     return "\n".join(all_lines[-lines:])
 
 
+def _visual_kind(path: str) -> str:
+    ext = os.path.splitext(path)[1].lower()
+    if ext in {".mp4", ".webm", ".mov"}:
+        return "video"
+    return "image"
+
+
 @contextmanager
 def _pushd(path: Optional[str]):
     previous = os.getcwd()
@@ -434,7 +454,106 @@ def _run_action(
     return ok, output, result
 
 
-def _serialize_world_row(repo: str, branchpoint_id: str, world_id: str) -> Dict[str, Any]:
+def _live_branch_state(repo: str, world: Dict[str, Any], branchpoint: Dict[str, Any]) -> Dict[str, Any]:
+    branch = str(world.get("branch", "")).strip()
+    source_ref = str(branchpoint.get("source_ref", "")).strip()
+    worktree = str(world.get("worktree", "")).strip()
+
+    if not branch:
+        return {
+            "branch_exists": False,
+            "head": None,
+            "ahead_commits": None,
+            "worktree_ok": False,
+            "dirty_files": None,
+            "source_head": None,
+            "commit_nodes": [],
+            "commit_nodes_truncated": False,
+        }
+
+    exists = branch_exists(branch, repo)
+    head = None
+    ahead = None
+    source_head = None
+    commit_nodes: List[Dict[str, str]] = []
+    commit_nodes_truncated = False
+    if exists:
+        head_proc = git(["rev-parse", "--short", branch], cwd=repo, check=False)
+        if head_proc.returncode == 0:
+            head = (head_proc.stdout or "").strip() or None
+        if source_ref:
+            source_head_proc = git(["rev-parse", "--short", source_ref], cwd=repo, check=False)
+            if source_head_proc.returncode == 0:
+                source_head = (source_head_proc.stdout or "").strip() or None
+            ahead_proc = git(["rev-list", "--count", f"{source_ref}..{branch}"], cwd=repo, check=False)
+            if ahead_proc.returncode == 0:
+                raw = (ahead_proc.stdout or "").strip()
+                try:
+                    ahead = int(raw)
+                except ValueError:
+                    ahead = None
+            log_proc = git(
+                [
+                    "log",
+                    "--reverse",
+                    "--max-count",
+                    "12",
+                    "--pretty=format:%h%x1f%s",
+                    f"{source_ref}..{branch}",
+                ],
+                cwd=repo,
+                check=False,
+            )
+        else:
+            log_proc = git(
+                [
+                    "log",
+                    "--reverse",
+                    "--max-count",
+                    "12",
+                    "--pretty=format:%h%x1f%s",
+                    branch,
+                ],
+                cwd=repo,
+                check=False,
+            )
+        if log_proc.returncode == 0:
+            for line in (log_proc.stdout or "").splitlines():
+                item = line.strip()
+                if not item:
+                    continue
+                if "\x1f" in item:
+                    sha, subject = item.split("\x1f", 1)
+                else:
+                    parts = item.split(" ", 1)
+                    sha = parts[0]
+                    subject = parts[1] if len(parts) > 1 else ""
+                commit_nodes.append({"sha": sha.strip(), "subject": subject.strip()})
+        if isinstance(ahead, int) and ahead > len(commit_nodes):
+            commit_nodes_truncated = True
+
+    worktree_ok = False
+    dirty_files = None
+    if worktree and os.path.isdir(worktree):
+        status_proc = git(["-C", worktree, "status", "--porcelain"], check=False)
+        if status_proc.returncode == 0:
+            worktree_ok = True
+            dirty_files = len([line for line in (status_proc.stdout or "").splitlines() if line.strip()])
+
+    return {
+        "branch_exists": exists,
+        "head": head,
+        "ahead_commits": ahead,
+        "worktree_ok": worktree_ok,
+        "dirty_files": dirty_files,
+        "source_head": source_head,
+        "commit_nodes": commit_nodes,
+        "commit_nodes_truncated": commit_nodes_truncated,
+    }
+
+
+def _serialize_world_row(repo: str, branchpoint: Dict[str, Any], world_id: str) -> Dict[str, Any]:
+    branchpoint_id = str(branchpoint.get("id", "")).strip()
     world = pw.load_world(repo, world_id)
     run = pw.load_run(repo, branchpoint_id, world_id)
     codex = pw.load_codex_run(repo, branchpoint_id, world_id)
@@ -464,11 +583,32 @@ def _serialize_world_row(repo: str, branchpoint_id: str, world_id: str) -> Dict[
             "raw": codex,
         }
 
+    render_row = _map_run(render, "render_log")
+    if render_row and render:
+        assets = render.get("visual_artifacts") or []
+        visual_assets: List[Dict[str, Any]] = []
+        if isinstance(assets, list):
+            for idx, asset_path in enumerate(assets):
+                path = str(asset_path).strip()
+                if not path:
+                    continue
+                qs = urlencode({"branchpoint": branchpoint_id, "world": world_id, "index": idx})
+                visual_assets.append(
+                    {
+                        "index": idx,
+                        "path": pw.relative_to_repo(path, repo),
+                        "kind": _visual_kind(path),
+                        "url": f"/api/render_asset?{qs}",
+                    }
+                )
+        render_row["visual_assets"] = visual_assets
+
     return {
         "world": world,
         "codex": codex_row,
         "run": _map_run(run, "trace_log"),
-        "render": _map_run(render, "render_log"),
+        "render": render_row,
+        "live": _live_branch_state(repo, world, branchpoint),
     }
 
 
@@ -692,7 +832,7 @@ class ParallelWorldsHandler(BaseHTTPRequestHandler):
                 if bp_id:
                     bp = pw.load_branchpoint(repo, bp_id)
                     payload["branchpoint"] = bp
-                    rows = [_serialize_world_row(repo, bp_id, wid) for wid in bp.get("world_ids", [])]
+                    rows = [_serialize_world_row(repo, bp, wid) for wid in bp.get("world_ids", [])]
                     rows.sort(key=lambda row: int(row["world"].get("index", 0)))
                     payload["world_rows"] = rows
 
@@ -753,6 +893,44 @@ class ParallelWorldsHandler(BaseHTTPRequestHandler):
                         "record": record,
                     },
                 )
+                return
+
+            if parsed.path == "/api/render_asset":
+                branchpoint_id = (query.get("branchpoint") or [""])[0].strip()
+                world_id = (query.get("world") or [""])[0].strip()
+                index_raw = (query.get("index") or [""])[0].strip()
+                if not branchpoint_id or not world_id or not index_raw:
+                    self._json(400, {"ok": False, "error": "branchpoint, world, and index are required"})
+                    return
+
+                try:
+                    index = int(index_raw)
+                except ValueError:
+                    self._json(400, {"ok": False, "error": "index must be an integer"})
+                    return
+                if index < 0:
+                    self._json(400, {"ok": False, "error": "index must be >= 0"})
+                    return
+
+                world = pw.load_world(repo, world_id)
+                worktree = os.path.realpath(str(world.get("worktree", "")))
+                render = pw.load_render(repo, branchpoint_id, world_id) or {}
+                artifacts = render.get("visual_artifacts") or []
+                if not isinstance(artifacts, list) or index >= len(artifacts):
+                    self._json(404, {"ok": False, "error": "visual artifact not found"})
+                    return
+
+                candidate = os.path.realpath(str(artifacts[index]))
+                if not candidate.startswith(worktree + os.sep) and candidate != worktree:
+                    self._json(403, {"ok": False, "error": "artifact path is outside worktree"})
+                    return
+                if not os.path.isfile(candidate):
+                    self._json(404, {"ok": False, "error": "artifact file not found"})
+                    return
+
+                content_type = mimetypes.guess_type(candidate)[0] or "application/octet-stream"
+                with open(candidate, "rb") as f:
+                    self._bytes(200, content_type, f.read())
                 return
 
             if self._serve_static(parsed.path):

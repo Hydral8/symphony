@@ -18,7 +18,8 @@
     "preview_lines": 25
   },
   "execution": {
-    "max_parallel_worlds": 3
+    "max_parallel_worlds": 4,
+    "workspace_mode": "worktree"
   },
   "strategies": [
     {

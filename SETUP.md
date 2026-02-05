@@ -50,7 +50,8 @@ Edit `parallel_worlds.json`:
     "preview_lines": 25
   },
   "execution": {
-    "max_parallel_worlds": 3
+    "max_parallel_worlds": 3,
+    "workspace_mode": "worktree"
   }
 }
 ```
@@ -64,6 +65,9 @@ Notes:
 - `runner.command` runs inside each world worktree.
 - `render.command` runs inside each world worktree and is used for playback/experience comparison.
 - `execution.max_parallel_worlds` controls how many worlds run/play concurrently.
+- `execution.workspace_mode` controls where commands run:
+  - `worktree`: each branch variant has its own git worktree; supports true parallel run/play.
+  - `branch`: one shared repo checkout; run/play is forced sequentially.
 - Leave `command` empty if you only want to fork worlds first.
 
 ## 3) Create a branchpoint and worlds
