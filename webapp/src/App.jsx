@@ -1,12 +1,34 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
-import { NavLink, Navigate, Route, Routes, useLocation } from "react-router-dom";
+import {
+  NavLink,
+  Navigate,
+  Route,
+  Routes,
+  useLocation,
+} from "react-router-dom";
 
 const API_BASE = import.meta.env.VITE_API_BASE || "";
 const RUNS_API_PREFIX = `${API_BASE}/api/v1`;
-const TASK_STATES = ["pending", "running", "blocked", "done", "failed", "paused", "stopped"];
+const TASK_STATES = [
+  "pending",
+  "running",
+  "blocked",
+  "done",
+  "failed",
+  "paused",
+  "stopped",
+];
 const LOCAL_STORAGE_KEY = "symphony.canvasPlan.v1.draft";
 
-const LAYER_KINDS = ["vision", "module", "uxui", "backend", "data", "infra", "task"];
+const LAYER_KINDS = [
+  "vision",
+  "module",
+  "uxui",
+  "backend",
+  "data",
+  "infra",
+  "task",
+];
 const POVS = ["product", "design", "engineering", "ops"];
 const NODE_TYPES = [
   "vision",
@@ -35,7 +57,8 @@ const EDGE_RELATIONS = [
   "tests",
 ];
 
-const UUID_RE = /^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-5][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}$/;
+const UUID_RE =
+  /^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-5][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}$/;
 const NODE_ID_RE = /^node_[a-zA-Z0-9_-]+$/;
 const EDGE_ID_RE = /^edge_[a-zA-Z0-9_-]+$/;
 const LAYER_ID_RE = /^layer_[a-zA-Z0-9_-]+$/;
@@ -45,8 +68,11 @@ function nowIso() {
 }
 
 function safeUUID() {
-  if (typeof crypto !== "undefined" && crypto.randomUUID) return crypto.randomUUID();
-  const bytes = Array.from({ length: 16 }, () => Math.floor(Math.random() * 256));
+  if (typeof crypto !== "undefined" && crypto.randomUUID)
+    return crypto.randomUUID();
+  const bytes = Array.from({ length: 16 }, () =>
+    Math.floor(Math.random() * 256),
+  );
   bytes[6] = (bytes[6] & 0x0f) | 0x40;
   bytes[8] = (bytes[8] & 0x3f) | 0x80;
   const hex = bytes.map((b) => b.toString(16).padStart(2, "0")).join("");
@@ -102,7 +128,8 @@ function fmtPct(value) {
 
 function unwrapData(payload) {
   if (!payload || typeof payload !== "object") return payload;
-  if (Object.prototype.hasOwnProperty.call(payload, "data")) return payload.data;
+  if (Object.prototype.hasOwnProperty.call(payload, "data"))
+    return payload.data;
   return payload;
 }
 
@@ -130,14 +157,18 @@ function normalizeDiagram(rawDiagram) {
 
   const nodes = sourceNodes
     .map((node, index) => {
-      const taskId = String(node.task_id || node.id || node.key || `task-${index + 1}`);
+      const taskId = String(
+        node.task_id || node.id || node.key || `task-${index + 1}`,
+      );
       return {
         taskId,
         title: String(node.title || node.name || node.label || taskId),
         status: normalizeTaskStatus(node.status),
         priority: node.priority,
         objective: node.objective || node.description || "",
-        acceptanceCriteria: Array.isArray(node.acceptance_criteria) ? node.acceptance_criteria : [],
+        acceptanceCriteria: Array.isArray(node.acceptance_criteria)
+          ? node.acceptance_criteria
+          : [],
         logs: node.logs || node.log || node.log_tail || "",
         artifacts: Array.isArray(node.artifacts) ? node.artifacts : [],
         raw: node,
@@ -179,10 +210,20 @@ function serializeEvent(rawText) {
   const payload = unwrapData(parsed) || {};
   const event = payload.event || payload;
   const eventType = String(event.event_type || event.type || "event");
-  const taskId = event.task_id || event.taskId || event.payload?.task_id || event.payload?.taskId || "";
+  const taskId =
+    event.task_id ||
+    event.taskId ||
+    event.payload?.task_id ||
+    event.payload?.taskId ||
+    "";
   const nextStatus = event.status || event.payload?.status || "";
-  const createdAt = event.created_at || event.timestamp || new Date().toISOString();
-  const detail = event.message || event.note || event.payload?.message || JSON.stringify(event.payload || payload || {});
+  const createdAt =
+    event.created_at || event.timestamp || new Date().toISOString();
+  const detail =
+    event.message ||
+    event.note ||
+    event.payload?.message ||
+    JSON.stringify(event.payload || payload || {});
   return {
     id: event.id || `${createdAt}-${taskId || "run"}-${eventType}`,
     type: eventType,
@@ -215,7 +256,8 @@ async function readJson(url, options) {
   const response = await fetch(url, options);
   const payload = await response.json();
   if (!response.ok || payload.ok === false) {
-    const err = payload.error || payload.output || `Request failed (${response.status})`;
+    const err =
+      payload.error || payload.output || `Request failed (${response.status})`;
     throw new Error(typeof err === "string" ? err : JSON.stringify(err));
   }
   return payload;
@@ -283,18 +325,26 @@ function loadLocalDraft() {
 function validatePlan(plan) {
   const errors = [];
   if (!plan || typeof plan !== "object") return ["Plan is missing or invalid."];
-  if (plan.schema_version !== "1.0") errors.push("schema_version must be '1.0'.");
-  if (!UUID_RE.test(plan.project_id || "")) errors.push("project_id must be a UUID.");
+  if (plan.schema_version !== "1.0")
+    errors.push("schema_version must be '1.0'.");
+  if (!UUID_RE.test(plan.project_id || ""))
+    errors.push("project_id must be a UUID.");
   if (!UUID_RE.test(plan.plan_id || "")) errors.push("plan_id must be a UUID.");
-  if (!Number.isInteger(plan.version) || plan.version < 1) errors.push("version must be an integer >= 1.");
-  if (!plan.metadata || typeof plan.metadata !== "object") errors.push("metadata is required.");
+  if (!Number.isInteger(plan.version) || plan.version < 1)
+    errors.push("version must be an integer >= 1.");
+  if (!plan.metadata || typeof plan.metadata !== "object")
+    errors.push("metadata is required.");
 
   const metadata = plan.metadata || {};
-  if (!metadata.name || !String(metadata.name).trim()) errors.push("metadata.name is required.");
-  if (!metadata.vision || !String(metadata.vision).trim()) errors.push("metadata.vision is required.");
-  if (!Array.isArray(metadata.goals) || metadata.goals.length < 1) errors.push("metadata.goals must have at least 1 item.");
+  if (!metadata.name || !String(metadata.name).trim())
+    errors.push("metadata.name is required.");
+  if (!metadata.vision || !String(metadata.vision).trim())
+    errors.push("metadata.vision is required.");
+  if (!Array.isArray(metadata.goals) || metadata.goals.length < 1)
+    errors.push("metadata.goals must have at least 1 item.");
 
-  if (!Array.isArray(plan.layers) || plan.layers.length < 1) errors.push("layers must contain at least one layer.");
+  if (!Array.isArray(plan.layers) || plan.layers.length < 1)
+    errors.push("layers must contain at least one layer.");
 
   const layerIds = new Set();
   const nodeIds = new Set();
@@ -304,38 +354,65 @@ function validatePlan(plan) {
       errors.push(`layers[${idx}] is invalid.`);
       return;
     }
-    if (!LAYER_ID_RE.test(layer.id || "")) errors.push(`layer id ${layer.id || "(missing)"} is invalid.`);
-    if (!layer.name || !String(layer.name).trim()) errors.push(`layer ${layer.id || idx} name is required.`);
-    if (!LAYER_KINDS.includes(layer.kind)) errors.push(`layer ${layer.id || idx} kind is invalid.`);
-    if (!POVS.includes(layer.pov)) errors.push(`layer ${layer.id || idx} pov is invalid.`);
-    if (!Number.isInteger(layer.order) || layer.order < 1) errors.push(`layer ${layer.id || idx} order must be >= 1.`);
-    if (!Array.isArray(layer.nodes)) errors.push(`layer ${layer.id || idx} nodes array is required.`);
-    if (!Array.isArray(layer.edges)) errors.push(`layer ${layer.id || idx} edges array is required.`);
+    if (!LAYER_ID_RE.test(layer.id || ""))
+      errors.push(`layer id ${layer.id || "(missing)"} is invalid.`);
+    if (!layer.name || !String(layer.name).trim())
+      errors.push(`layer ${layer.id || idx} name is required.`);
+    if (!LAYER_KINDS.includes(layer.kind))
+      errors.push(`layer ${layer.id || idx} kind is invalid.`);
+    if (!POVS.includes(layer.pov))
+      errors.push(`layer ${layer.id || idx} pov is invalid.`);
+    if (!Number.isInteger(layer.order) || layer.order < 1)
+      errors.push(`layer ${layer.id || idx} order must be >= 1.`);
+    if (!Array.isArray(layer.nodes))
+      errors.push(`layer ${layer.id || idx} nodes array is required.`);
+    if (!Array.isArray(layer.edges))
+      errors.push(`layer ${layer.id || idx} edges array is required.`);
     if (layer.id) layerIds.add(layer.id);
 
     (layer.nodes || []).forEach((node) => {
-      if (!NODE_ID_RE.test(node.id || "")) errors.push(`node id ${node.id || "(missing)"} is invalid.`);
-      if (!layer.id || node.layer_id !== layer.id) errors.push(`node ${node.id || "(missing)"} layer_id mismatch.`);
-      if (!NODE_TYPES.includes(node.type)) errors.push(`node ${node.id || "(missing)"} type is invalid.`);
-      if (!node.label || !String(node.label).trim()) errors.push(`node ${node.id || "(missing)"} label is required.`);
-      if (!node.summary || !String(node.summary).trim()) errors.push(`node ${node.id || "(missing)"} summary is required.`);
-      if (!NODE_STATUSES.includes(node.status)) errors.push(`node ${node.id || "(missing)"} status is invalid.`);
-      if (node.priority && !NODE_PRIORITIES.includes(node.priority)) errors.push(`node ${node.id || "(missing)"} priority is invalid.`);
-      if (!node.position || typeof node.position.x !== "number" || typeof node.position.y !== "number") {
+      if (!NODE_ID_RE.test(node.id || ""))
+        errors.push(`node id ${node.id || "(missing)"} is invalid.`);
+      if (!layer.id || node.layer_id !== layer.id)
+        errors.push(`node ${node.id || "(missing)"} layer_id mismatch.`);
+      if (!NODE_TYPES.includes(node.type))
+        errors.push(`node ${node.id || "(missing)"} type is invalid.`);
+      if (!node.label || !String(node.label).trim())
+        errors.push(`node ${node.id || "(missing)"} label is required.`);
+      if (!node.summary || !String(node.summary).trim())
+        errors.push(`node ${node.id || "(missing)"} summary is required.`);
+      if (!NODE_STATUSES.includes(node.status))
+        errors.push(`node ${node.id || "(missing)"} status is invalid.`);
+      if (node.priority && !NODE_PRIORITIES.includes(node.priority))
+        errors.push(`node ${node.id || "(missing)"} priority is invalid.`);
+      if (
+        !node.position ||
+        typeof node.position.x !== "number" ||
+        typeof node.position.y !== "number"
+      ) {
         errors.push(`node ${node.id || "(missing)"} position is invalid.`);
       }
-      if (!node.size || typeof node.size.w !== "number" || typeof node.size.h !== "number") {
+      if (
+        !node.size ||
+        typeof node.size.w !== "number" ||
+        typeof node.size.h !== "number"
+      ) {
         errors.push(`node ${node.id || "(missing)"} size is invalid.`);
       }
-      if (node.size && (node.size.w <= 0 || node.size.h <= 0)) errors.push(`node ${node.id || "(missing)"} size must be > 0.`);
+      if (node.size && (node.size.w <= 0 || node.size.h <= 0))
+        errors.push(`node ${node.id || "(missing)"} size must be > 0.`);
       if (node.id) nodeIds.add(node.id);
     });
 
     (layer.edges || []).forEach((edge) => {
-      if (!EDGE_ID_RE.test(edge.id || "")) errors.push(`edge id ${edge.id || "(missing)"} is invalid.`);
-      if (!NODE_ID_RE.test(edge.source || "")) errors.push(`edge ${edge.id || "(missing)"} source is invalid.`);
-      if (!NODE_ID_RE.test(edge.target || "")) errors.push(`edge ${edge.id || "(missing)"} target is invalid.`);
-      if (!EDGE_RELATIONS.includes(edge.relation)) errors.push(`edge ${edge.id || "(missing)"} relation is invalid.`);
+      if (!EDGE_ID_RE.test(edge.id || ""))
+        errors.push(`edge id ${edge.id || "(missing)"} is invalid.`);
+      if (!NODE_ID_RE.test(edge.source || ""))
+        errors.push(`edge ${edge.id || "(missing)"} source is invalid.`);
+      if (!NODE_ID_RE.test(edge.target || ""))
+        errors.push(`edge ${edge.id || "(missing)"} target is invalid.`);
+      if (!EDGE_RELATIONS.includes(edge.relation))
+        errors.push(`edge ${edge.id || "(missing)"} relation is invalid.`);
     });
   });
 
@@ -344,25 +421,47 @@ function validatePlan(plan) {
     errors.push("cross_layer_edges must be an array.");
   } else {
     crossEdges.forEach((edge) => {
-      if (!EDGE_ID_RE.test(edge.id || "")) errors.push(`cross edge id ${edge.id || "(missing)"} is invalid.`);
-      if (!NODE_ID_RE.test(edge.source || "")) errors.push(`cross edge ${edge.id || "(missing)"} source is invalid.`);
-      if (!NODE_ID_RE.test(edge.target || "")) errors.push(`cross edge ${edge.id || "(missing)"} target is invalid.`);
-      if (!EDGE_RELATIONS.includes(edge.relation)) errors.push(`cross edge ${edge.id || "(missing)"} relation is invalid.`);
+      if (!EDGE_ID_RE.test(edge.id || ""))
+        errors.push(`cross edge id ${edge.id || "(missing)"} is invalid.`);
+      if (!NODE_ID_RE.test(edge.source || ""))
+        errors.push(`cross edge ${edge.id || "(missing)"} source is invalid.`);
+      if (!NODE_ID_RE.test(edge.target || ""))
+        errors.push(`cross edge ${edge.id || "(missing)"} target is invalid.`);
+      if (!EDGE_RELATIONS.includes(edge.relation))
+        errors.push(
+          `cross edge ${edge.id || "(missing)"} relation is invalid.`,
+        );
     });
   }
 
   (plan.layers || []).forEach((layer) => {
     (layer.edges || []).forEach((edge) => {
-      if (edge.source && !nodeIds.has(edge.source)) errors.push(`edge ${edge.id || "(missing)"} source node not found.`);
-      if (edge.target && !nodeIds.has(edge.target)) errors.push(`edge ${edge.id || "(missing)"} target node not found.`);
+      if (edge.source && !nodeIds.has(edge.source))
+        errors.push(`edge ${edge.id || "(missing)"} source node not found.`);
+      if (edge.target && !nodeIds.has(edge.target))
+        errors.push(`edge ${edge.id || "(missing)"} target node not found.`);
     });
   });
   (crossEdges || []).forEach((edge) => {
-    if (edge.source && !nodeIds.has(edge.source)) errors.push(`cross edge ${edge.id || "(missing)"} source node not found.`);
-    if (edge.target && !nodeIds.has(edge.target)) errors.push(`cross edge ${edge.id || "(missing)"} target node not found.`);
+    if (edge.source && !nodeIds.has(edge.source))
+      errors.push(
+        `cross edge ${edge.id || "(missing)"} source node not found.`,
+      );
+    if (edge.target && !nodeIds.has(edge.target))
+      errors.push(
+        `cross edge ${edge.id || "(missing)"} target node not found.`,
+      );
   });
 
   return errors;
+}
+
+// Helper for Bezier Curves
+function getEdgePath(x1, y1, x2, y2) {
+  const dist = Math.sqrt(Math.pow(x2 - x1, 2) + Math.pow(y2 - y1, 2));
+  const curvature = Math.max(dist * 0.4, 50);
+  // Using horizontal handles for L-to-R flow logic, but adaptable
+  return `M ${x1} ${y1} C ${x1 + curvature} ${y1}, ${x2 - curvature} ${y2}, ${x2} ${y2}`;
 }
 
 function CanvasPlannerView() {
@@ -379,7 +478,12 @@ function CanvasPlannerView() {
   });
   const [connectFromId, setConnectFromId] = useState(null);
   const [message, setMessage] = useState("");
-  const [addLayerForm, setAddLayerForm] = useState({ name: "", kind: "module", pov: "engineering", order: "" });
+  const [addLayerForm, setAddLayerForm] = useState({
+    name: "",
+    kind: "module",
+    pov: "engineering",
+    order: "",
+  });
   const [addNodeForm, setAddNodeForm] = useState({
     layerId: "",
     type: "module",
@@ -391,6 +495,38 @@ function CanvasPlannerView() {
 
   const surfaceRef = useRef(null);
   const [dragState, setDragState] = useState(null);
+  const [viewport, setViewport] = useState({ x: 0, y: 0, zoom: 1 });
+  const [isPanning, setIsPanning] = useState(false);
+
+  // Pan & Zoom Handlers
+  function handleWheel(e) {
+    if (e.ctrlKey || e.metaKey) {
+      e.preventDefault();
+      const zoomSensitivity = 0.001;
+      const delta = -e.deltaY * zoomSensitivity;
+      const newZoom = Math.min(Math.max(viewport.zoom + delta, 0.1), 5);
+      setViewport((prev) => ({ ...prev, zoom: newZoom }));
+    } else {
+      setViewport((prev) => ({
+        ...prev,
+        x: prev.x - e.deltaX,
+        y: prev.y - e.deltaY,
+      }));
+    }
+  }
+
+  function handleCanvasPointerDown(e) {
+    if (e.button === 1 || e.button === 0) {
+      setIsPanning(true);
+      setDragState({
+        mode: "pan",
+        startX: e.clientX,
+        startY: e.clientY,
+        viewX: viewport.x,
+        viewY: viewport.y,
+      });
+    }
+  }
 
   useEffect(() => {
     try {
@@ -402,7 +538,9 @@ function CanvasPlannerView() {
 
   useEffect(() => {
     if (!selectedNodeId) return;
-    const exists = plan.layers.some((layer) => layer.nodes.some((node) => node.id === selectedNodeId));
+    const exists = plan.layers.some((layer) =>
+      layer.nodes.some((node) => node.id === selectedNodeId),
+    );
     if (!exists) setSelectedNodeId(null);
   }, [plan, selectedNodeId]);
 
@@ -412,39 +550,52 @@ function CanvasPlannerView() {
     const found =
       scope === "cross"
         ? plan.cross_layer_edges.some((edge) => edge.id === edgeId)
-        : plan.layers.some((layer) => layer.edges.some((edge) => edge.id === edgeId));
+        : plan.layers.some((layer) =>
+            layer.edges.some((edge) => edge.id === edgeId),
+          );
     if (!found) setSelectedEdgeKey(null);
   }, [plan, selectedEdgeKey]);
 
   useEffect(() => {
     if (!dragState) return;
     function onPointerMove(event) {
+      if (dragState.mode === "pan") {
+        const dx = event.clientX - dragState.startX;
+        const dy = event.clientY - dragState.startY;
+        setViewport({
+          ...viewport,
+          x: dragState.viewX + dx,
+          y: dragState.viewY + dy,
+        });
+        return;
+      }
+
       if (!surfaceRef.current) return;
-      const rect = surfaceRef.current.getBoundingClientRect();
-      const x = event.clientX - rect.left - dragState.offsetX;
-      const y = event.clientY - rect.top - dragState.offsetY;
-      setPlan((prev) => {
-        const updated = {
-          ...prev,
-          created_at: prev.created_at || nowIso(),
-          updated_at: nowIso(),
-          layers: prev.layers.map((layer) => ({
-            ...layer,
-            nodes: layer.nodes.map((node) =>
-              node.id === dragState.nodeId
-                ? {
-                    ...node,
-                    position: { x: Math.max(0, Math.round(x)), y: Math.max(0, Math.round(y)) },
-                  }
-                : node,
-            ),
-          })),
-        };
-        return updated;
-      });
+      const worldX = (event.clientX - viewport.x) / viewport.zoom;
+      const worldY = (event.clientY - viewport.y) / viewport.zoom;
+      const nodeX = worldX - dragState.localX;
+      const nodeY = worldY - dragState.localY;
+
+      setPlan((prev) => ({
+        ...prev,
+        created_at: prev.created_at || nowIso(),
+        updated_at: nowIso(),
+        layers: prev.layers.map((layer) => ({
+          ...layer,
+          nodes: layer.nodes.map((node) =>
+            node.id === dragState.nodeId
+              ? {
+                  ...node,
+                  position: { x: Math.round(nodeX), y: Math.round(nodeY) },
+                }
+              : node,
+          ),
+        })),
+      }));
     }
     function onPointerUp() {
       setDragState(null);
+      setIsPanning(false);
     }
     window.addEventListener("pointermove", onPointerMove);
     window.addEventListener("pointerup", onPointerUp);
@@ -452,7 +603,7 @@ function CanvasPlannerView() {
       window.removeEventListener("pointermove", onPointerMove);
       window.removeEventListener("pointerup", onPointerUp);
     };
-  }, [dragState]);
+  }, [dragState, viewport]);
 
   const nodeMap = useMemo(() => {
     const map = new Map();
@@ -473,21 +624,34 @@ function CanvasPlannerView() {
     return layers;
   }, [plan.layers, selectedLayerId, selectedPov]);
 
-  const visibleNodes = useMemo(() => filteredLayers.flatMap((layer) => layer.nodes), [filteredLayers]);
-  const visibleNodeIds = useMemo(() => new Set(visibleNodes.map((node) => node.id)), [visibleNodes]);
+  const visibleNodes = useMemo(
+    () => filteredLayers.flatMap((layer) => layer.nodes),
+    [filteredLayers],
+  );
+  const visibleNodeIds = useMemo(
+    () => new Set(visibleNodes.map((node) => node.id)),
+    [visibleNodes],
+  );
 
   const visibleEdges = useMemo(() => {
     const layerEdges = filteredLayers.flatMap((layer) =>
       layer.edges.map((edge) => ({ scope: "layer", layerId: layer.id, edge })),
     );
-    const crossEdges = plan.cross_layer_edges.map((edge) => ({ scope: "cross", layerId: null, edge }));
+    const crossEdges = plan.cross_layer_edges.map((edge) => ({
+      scope: "cross",
+      layerId: null,
+      edge,
+    }));
     return [...layerEdges, ...crossEdges].filter(
-      (entry) => visibleNodeIds.has(entry.edge.source) && visibleNodeIds.has(entry.edge.target),
+      (entry) =>
+        visibleNodeIds.has(entry.edge.source) &&
+        visibleNodeIds.has(entry.edge.target),
     );
   }, [filteredLayers, plan.cross_layer_edges, visibleNodeIds]);
 
   const selectedLayer = useMemo(() => {
-    if (selectedLayerId !== "all") return plan.layers.find((layer) => layer.id === selectedLayerId) || null;
+    if (selectedLayerId !== "all")
+      return plan.layers.find((layer) => layer.id === selectedLayerId) || null;
     return plan.layers[0] || null;
   }, [plan.layers, selectedLayerId]);
 
@@ -500,7 +664,10 @@ function CanvasPlannerView() {
     if (!selectedEdgeKey) return null;
     const [scope, edgeId] = selectedEdgeKey.split(":");
     if (scope === "cross") {
-      return { scope, edge: plan.cross_layer_edges.find((edge) => edge.id === edgeId) || null };
+      return {
+        scope,
+        edge: plan.cross_layer_edges.find((edge) => edge.id === edgeId) || null,
+      };
     }
     for (const layer of plan.layers) {
       const match = layer.edges.find((edge) => edge.id === edgeId);
@@ -549,12 +716,19 @@ function CanvasPlannerView() {
       name: addLayerForm.name.trim(),
       kind: addLayerForm.kind,
       pov: addLayerForm.pov,
-      order: addLayerForm.order ? Number(addLayerForm.order) : plan.layers.length + 1,
+      order: addLayerForm.order
+        ? Number(addLayerForm.order)
+        : plan.layers.length + 1,
       nodes: [],
       edges: [],
     };
     updatePlan((prev) => ({ ...prev, layers: [...prev.layers, newLayer] }));
-    setAddLayerForm({ name: "", kind: "module", pov: "engineering", order: "" });
+    setAddLayerForm({
+      name: "",
+      kind: "module",
+      pov: "engineering",
+      order: "",
+    });
     setMessage("Layer added.");
   }
 
@@ -565,7 +739,10 @@ function CanvasPlannerView() {
       setMessage("Delete nodes in the layer before removing it.");
       return;
     }
-    updatePlan((prev) => ({ ...prev, layers: prev.layers.filter((item) => item.id !== layerId) }));
+    updatePlan((prev) => ({
+      ...prev,
+      layers: prev.layers.filter((item) => item.id !== layerId),
+    }));
     if (selectedLayerId === layerId) setSelectedLayerId("all");
     setMessage("Layer removed.");
   }
@@ -596,7 +773,9 @@ function CanvasPlannerView() {
     updatePlan((prev) => ({
       ...prev,
       layers: prev.layers.map((layer) =>
-        layer.id === targetLayerId ? { ...layer, nodes: [...layer.nodes, newNode] } : layer,
+        layer.id === targetLayerId
+          ? { ...layer, nodes: [...layer.nodes, newNode] }
+          : layer,
       ),
     }));
     setSelectedNodeId(newNode.id);
@@ -609,9 +788,13 @@ function CanvasPlannerView() {
       const nextLayers = prev.layers.map((layer) => ({
         ...layer,
         nodes: layer.nodes.filter((node) => node.id !== nodeId),
-        edges: layer.edges.filter((edge) => edge.source !== nodeId && edge.target !== nodeId),
+        edges: layer.edges.filter(
+          (edge) => edge.source !== nodeId && edge.target !== nodeId,
+        ),
       }));
-      const nextCross = prev.cross_layer_edges.filter((edge) => edge.source !== nodeId && edge.target !== nodeId);
+      const nextCross = prev.cross_layer_edges.filter(
+        (edge) => edge.source !== nodeId && edge.target !== nodeId,
+      );
       return { ...prev, layers: nextLayers, cross_layer_edges: nextCross };
     });
     setSelectedNodeId(null);
@@ -622,11 +805,12 @@ function CanvasPlannerView() {
   function startDrag(event, node) {
     if (connectMode.active) return;
     event.stopPropagation();
-    const rect = event.currentTarget.getBoundingClientRect();
+    const mouseWorldX = (event.clientX - viewport.x) / viewport.zoom;
+    const mouseWorldY = (event.clientY - viewport.y) / viewport.zoom;
     setDragState({
       nodeId: node.id,
-      offsetX: event.clientX - rect.left,
-      offsetY: event.clientY - rect.top,
+      localX: mouseWorldX - node.position.x,
+      localY: mouseWorldY - node.position.y,
     });
   }
 
@@ -649,22 +833,33 @@ function CanvasPlannerView() {
         setConnectFromId(null);
         return;
       }
-      if (connectMode.scope === "layer" && sourceNode.layer_id !== targetNode.layer_id) {
+      if (
+        connectMode.scope === "layer" &&
+        sourceNode.layer_id !== targetNode.layer_id
+      ) {
         setMessage("Layer edges require source and target in the same layer.");
         setConnectFromId(null);
         return;
       }
       const hasDuplicate = (edges) =>
         edges.some(
-          (edge) => edge.source === sourceNode.id && edge.target === targetNode.id && edge.relation === connectMode.relation,
+          (edge) =>
+            edge.source === sourceNode.id &&
+            edge.target === targetNode.id &&
+            edge.relation === connectMode.relation,
         );
-      if (connectMode.scope === "cross" && hasDuplicate(plan.cross_layer_edges)) {
+      if (
+        connectMode.scope === "cross" &&
+        hasDuplicate(plan.cross_layer_edges)
+      ) {
         setMessage("Duplicate cross-layer edge already exists.");
         setConnectFromId(null);
         return;
       }
       if (connectMode.scope === "layer") {
-        const layer = plan.layers.find((item) => item.id === sourceNode.layer_id);
+        const layer = plan.layers.find(
+          (item) => item.id === sourceNode.layer_id,
+        );
         if (layer && hasDuplicate(layer.edges)) {
           setMessage("Duplicate layer edge already exists.");
           setConnectFromId(null);
@@ -680,7 +875,10 @@ function CanvasPlannerView() {
       };
       updatePlan((prev) => {
         if (connectMode.scope === "cross") {
-          return { ...prev, cross_layer_edges: [...prev.cross_layer_edges, newEdge] };
+          return {
+            ...prev,
+            cross_layer_edges: [...prev.cross_layer_edges, newEdge],
+          };
         }
         return {
           ...prev,
@@ -701,7 +899,12 @@ function CanvasPlannerView() {
   function deleteEdge(scope, edgeId) {
     updatePlan((prev) => {
       if (scope === "cross") {
-        return { ...prev, cross_layer_edges: prev.cross_layer_edges.filter((edge) => edge.id !== edgeId) };
+        return {
+          ...prev,
+          cross_layer_edges: prev.cross_layer_edges.filter(
+            (edge) => edge.id !== edgeId,
+          ),
+        };
       }
       return {
         ...prev,
@@ -720,14 +923,18 @@ function CanvasPlannerView() {
       if (scope === "cross") {
         return {
           ...prev,
-          cross_layer_edges: prev.cross_layer_edges.map((edge) => (edge.id === edgeId ? { ...edge, ...patch } : edge)),
+          cross_layer_edges: prev.cross_layer_edges.map((edge) =>
+            edge.id === edgeId ? { ...edge, ...patch } : edge,
+          ),
         };
       }
       return {
         ...prev,
         layers: prev.layers.map((layer) => ({
           ...layer,
-          edges: layer.edges.map((edge) => (edge.id === edgeId ? { ...edge, ...patch } : edge)),
+          edges: layer.edges.map((edge) =>
+            edge.id === edgeId ? { ...edge, ...patch } : edge,
+          ),
         })),
       };
     });
@@ -738,7 +945,9 @@ function CanvasPlannerView() {
       ...prev,
       layers: prev.layers.map((layer) => ({
         ...layer,
-        nodes: layer.nodes.map((node) => (node.id === nodeId ? { ...node, ...patch } : node)),
+        nodes: layer.nodes.map((node) =>
+          node.id === nodeId ? { ...node, ...patch } : node,
+        ),
       })),
     }));
   }
@@ -751,7 +960,9 @@ function CanvasPlannerView() {
   }
 
   function downloadExport() {
-    const name = (plan.metadata?.name || "plan").toLowerCase().replace(/\s+/g, "-");
+    const name = (plan.metadata?.name || "plan")
+      .toLowerCase()
+      .replace(/\s+/g, "-");
     const filename = `${name}-v${plan.version}.json`;
     const blob = new Blob([exportJson], { type: "application/json" });
     const url = URL.createObjectURL(blob);
@@ -764,503 +975,465 @@ function CanvasPlannerView() {
   }
 
   return (
-    <main className="shell canvas-shell">
-      <header className="hero canvas-hero">
-        <div>
-          <p className="eyebrow">Planning Canvas</p>
-          <h1>Symphony Planner</h1>
-          <p className="subtle">Draft ID: <code>{plan.plan_id}</code></p>
+    <main className="canvas-root">
+      {/* Floating Toolbar */}
+      <nav className="glass-panel toolbar-dock animate-slide-up">
+        <div className="toolbar-group">
+          <span className="eyebrow" style={{ margin: 0 }}>
+            Symphony
+          </span>
         </div>
-        <div className="hero-actions">
-          <button className="btn ghost" onClick={resetDraft}>Reset Draft</button>
-          <button className="btn ghost" onClick={clearDraft}>Clear Local Draft</button>
+
+        <div className="toolbar-group">
+          <button className="btn ghost small" onClick={resetDraft}>
+            Reset
+          </button>
+          <button className="btn ghost small" onClick={clearDraft}>
+            Clear
+          </button>
         </div>
-      </header>
 
-      {message ? (
-        <section className="glass notice">
-          <pre>{message}</pre>
-        </section>
-      ) : null}
-
-      <section className="canvas-grid">
-        <aside className="glass canvas-panel">
-          <h2>Plan Metadata</h2>
-          <label>
-            Name
-            <input
-              value={plan.metadata.name}
-              onChange={(e) => updatePlan((prev) => ({ ...prev, metadata: { ...prev.metadata, name: e.target.value } }))}
-            />
-          </label>
-          <label>
-            Vision
-            <textarea
-              value={plan.metadata.vision}
-              onChange={(e) => updatePlan((prev) => ({ ...prev, metadata: { ...prev.metadata, vision: e.target.value } }))}
-            />
-          </label>
-          <label>
-            Goals (one per line)
-            <textarea
-              value={(plan.metadata.goals || []).join("\n")}
-              onChange={(e) =>
-                updatePlan((prev) => ({
-                  ...prev,
-                  metadata: { ...prev.metadata, goals: splitLines(e.target.value) },
-                }))
-              }
-            />
-          </label>
-
-          <h3>Filters</h3>
-          <div className="grid two">
-            <label>
-              Layer
-              <select value={selectedLayerId} onChange={(e) => setSelectedLayerId(e.target.value)}>
-                <option value="all">All layers</option>
-                {plan.layers.map((layer) => (
-                  <option key={layer.id} value={layer.id}>{layer.name}</option>
-                ))}
-              </select>
-            </label>
-            <label>
-              POV
-              <select value={selectedPov} onChange={(e) => setSelectedPov(e.target.value)}>
-                <option value="all">All POVs</option>
-                {POVS.map((pov) => (
-                  <option key={pov} value={pov}>{pov}</option>
-                ))}
-              </select>
-            </label>
-          </div>
-
-          <h3>Layers</h3>
-          <div className="stack">
-            {plan.layers.map((layer) => (
-              <div key={layer.id} className={`layer-card ${selectedLayerId === layer.id ? "active" : ""}`}>
-                <div className="row between">
-                  <strong>{layer.name}</strong>
-                  <button className="btn small ghost" onClick={() => setSelectedLayerId(layer.id)}>Select</button>
-                </div>
-                <div className="grid two">
-                  <label>
-                    Kind
-                    <select
-                      value={layer.kind}
-                      onChange={(e) =>
-                        updatePlan((prev) => ({
-                          ...prev,
-                          layers: prev.layers.map((item) =>
-                            item.id === layer.id ? { ...item, kind: e.target.value } : item,
-                          ),
-                        }))
-                      }
-                    >
-                      {LAYER_KINDS.map((kind) => (
-                        <option key={kind} value={kind}>{kind}</option>
-                      ))}
-                    </select>
-                  </label>
-                  <label>
-                    POV
-                    <select
-                      value={layer.pov}
-                      onChange={(e) =>
-                        updatePlan((prev) => ({
-                          ...prev,
-                          layers: prev.layers.map((item) =>
-                            item.id === layer.id ? { ...item, pov: e.target.value } : item,
-                          ),
-                        }))
-                      }
-                    >
-                      {POVS.map((pov) => (
-                        <option key={pov} value={pov}>{pov}</option>
-                      ))}
-                    </select>
-                  </label>
-                </div>
-                <label>
-                  Order
-                  <input
-                    value={layer.order}
-                    onChange={(e) =>
-                      updatePlan((prev) => ({
-                        ...prev,
-                        layers: prev.layers.map((item) =>
-                          item.id === layer.id ? { ...item, order: Number(e.target.value) || 1 } : item,
-                        ),
-                      }))
-                    }
-                  />
-                </label>
-                <button className="btn small" onClick={() => deleteLayer(layer.id)}>Delete Layer</button>
-              </div>
-            ))}
-          </div>
-          <label>
-            New Layer Name
-            <input
-              value={addLayerForm.name}
-              onChange={(e) => setAddLayerForm((form) => ({ ...form, name: e.target.value }))}
-              placeholder="Backend Systems"
-            />
-          </label>
-          <div className="grid two">
-            <label>
-              Kind
-              <select value={addLayerForm.kind} onChange={(e) => setAddLayerForm((form) => ({ ...form, kind: e.target.value }))}>
-                {LAYER_KINDS.map((kind) => (
-                  <option key={kind} value={kind}>{kind}</option>
-                ))}
-              </select>
-            </label>
-            <label>
-              POV
-              <select value={addLayerForm.pov} onChange={(e) => setAddLayerForm((form) => ({ ...form, pov: e.target.value }))}>
-                {POVS.map((pov) => (
-                  <option key={pov} value={pov}>{pov}</option>
-                ))}
-              </select>
-            </label>
-          </div>
-          <label>
-            Order (optional)
-            <input
-              value={addLayerForm.order}
-              onChange={(e) => setAddLayerForm((form) => ({ ...form, order: e.target.value }))}
-              placeholder={`${plan.layers.length + 1}`}
-            />
-          </label>
-          <button className="btn" onClick={addLayer}>Add Layer</button>
-
-          <h3>Add Node</h3>
-          <label>
-            Layer
+        <div className="toolbar-group">
+          <label
+            className="flex-center"
+            style={{ gap: 6, fontSize: "0.85rem" }}
+          >
+            <span style={{ color: "var(--ink-muted)" }}>Layer:</span>
             <select
-              value={addNodeForm.layerId}
-              onChange={(e) => setAddNodeForm((form) => ({ ...form, layerId: e.target.value }))}
+              value={selectedLayerId}
+              onChange={(e) => setSelectedLayerId(e.target.value)}
+              className="glass"
+              style={{
+                padding: "4px 8px",
+                borderRadius: 6,
+                border: "none",
+                background: "rgba(255,255,255,0.1)",
+              }}
             >
-              <option value="">Use selected layer</option>
+              <option value="all">All Layers</option>
               {plan.layers.map((layer) => (
-                <option key={layer.id} value={layer.id}>{layer.name}</option>
+                <option key={layer.id} value={layer.id}>
+                  {layer.name}
+                </option>
               ))}
             </select>
           </label>
-          <div className="grid two">
-            <label>
-              Type
-              <select value={addNodeForm.type} onChange={(e) => setAddNodeForm((form) => ({ ...form, type: e.target.value }))}>
-                {NODE_TYPES.map((type) => (
-                  <option key={type} value={type}>{type}</option>
-                ))}
-              </select>
-            </label>
-            <label>
-              Status
-              <select value={addNodeForm.status} onChange={(e) => setAddNodeForm((form) => ({ ...form, status: e.target.value }))}>
-                {NODE_STATUSES.map((status) => (
-                  <option key={status} value={status}>{status}</option>
-                ))}
-              </select>
-            </label>
-          </div>
-          <label>
-            Label
-            <input value={addNodeForm.label} onChange={(e) => setAddNodeForm((form) => ({ ...form, label: e.target.value }))} />
-          </label>
-          <label>
-            Summary
-            <textarea value={addNodeForm.summary} onChange={(e) => setAddNodeForm((form) => ({ ...form, summary: e.target.value }))} />
-          </label>
-          <label>
-            Priority
-            <select
-              value={addNodeForm.priority}
-              onChange={(e) => setAddNodeForm((form) => ({ ...form, priority: e.target.value }))}
-            >
-              {NODE_PRIORITIES.map((priority) => (
-                <option key={priority} value={priority}>{priority}</option>
-              ))}
-            </select>
-          </label>
-          <button className="btn" onClick={addNode}>Add Node</button>
+        </div>
 
-          <h3>Connect Mode</h3>
-          <label className="check">
+        <div className="toolbar-group">
+          <label className="btn ghost small">
             <input
               type="checkbox"
               checked={connectMode.active}
               onChange={(e) => {
-                setConnectMode((state) => ({ ...state, active: e.target.checked }));
+                setConnectMode((state) => ({
+                  ...state,
+                  active: e.target.checked,
+                }));
                 setConnectFromId(null);
               }}
+              style={{ width: "auto", marginRight: 6 }}
             />
-            Enable connect mode
+            Connect Mode
           </label>
-          <label>
-            Edge Scope
-            <select
-              value={connectMode.scope}
-              onChange={(e) => setConnectMode((state) => ({ ...state, scope: e.target.value }))}
+        </div>
+
+        <div className="toolbar-group">
+          <button className="btn primary small" onClick={downloadExport}>
+            Export JSON
+          </button>
+        </div>
+      </nav>
+
+      {/* Floating Layer Panel */}
+      <aside className="glass-panel layer-dock animate-fade-in">
+        <div className="flex-between" style={{ marginBottom: 12 }}>
+          <span className="eyebrow">Layers</span>
+          <button
+            className="btn ghost small"
+            onClick={addLayer}
+            style={{ padding: "4px 8px" }}
+          >
+            + New
+          </button>
+        </div>
+
+        <div className="flex-col" style={{ gap: 8 }}>
+          {plan.layers.map((layer) => (
+            <div
+              key={layer.id}
+              className={`layer-item ${selectedLayerId === layer.id ? "active" : ""}`}
+              onClick={() => setSelectedLayerId(layer.id)}
             >
-              <option value="layer">Layer edge</option>
-              <option value="cross">Cross-layer edge</option>
-            </select>
-          </label>
-          <label>
-            Relation
+              <span style={{ fontWeight: 500, fontSize: "0.9rem" }}>
+                {layer.name}
+              </span>
+              <div className="flex-center" style={{ gap: 4 }}>
+                <span className="badge pending">{layer.nodes.length}</span>
+                <button
+                  className="btn ghost small"
+                  style={{
+                    padding: 2,
+                    height: 20,
+                    width: 20,
+                    display: "flex",
+                    alignItems: "center",
+                    justifyContent: "center",
+                  }}
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    deleteLayer(layer.id);
+                  }}
+                >
+                  ×
+                </button>
+              </div>
+            </div>
+          ))}
+        </div>
+
+        <div
+          className="glass-panel"
+          style={{ padding: 10, marginTop: 12, background: "rgba(0,0,0,0.2)" }}
+        >
+          <input
+            value={addLayerForm.name}
+            onChange={(e) =>
+              setAddLayerForm((form) => ({ ...form, name: e.target.value }))
+            }
+            placeholder="New Layer Name..."
+            style={{
+              marginBottom: 8,
+              background: "transparent",
+              border: "1px solid var(--line)",
+            }}
+          />
+          <div className="flex-between">
             <select
-              value={connectMode.relation}
-              onChange={(e) => setConnectMode((state) => ({ ...state, relation: e.target.value }))}
+              value={addLayerForm.kind}
+              onChange={(e) =>
+                setAddLayerForm((form) => ({ ...form, kind: e.target.value }))
+              }
+              style={{ width: "48%", padding: 4, fontSize: "0.8rem" }}
             >
-              {EDGE_RELATIONS.map((relation) => (
-                <option key={relation} value={relation}>{relation}</option>
+              {LAYER_KINDS.map((k) => (
+                <option key={k} value={k}>
+                  {k}
+                </option>
               ))}
             </select>
-          </label>
-          <label className="check">
-            <input
-              type="checkbox"
-              checked={connectMode.required}
-              onChange={(e) => setConnectMode((state) => ({ ...state, required: e.target.checked }))}
-            />
-            Required edge
-          </label>
-          {connectFromId ? (
-            <button className="btn ghost" onClick={() => setConnectFromId(null)}>Cancel connect</button>
-          ) : null}
-        </aside>
+            <select
+              value={addLayerForm.pov}
+              onChange={(e) =>
+                setAddLayerForm((form) => ({ ...form, pov: e.target.value }))
+              }
+              style={{ width: "48%", padding: 4, fontSize: "0.8rem" }}
+            >
+              {POVS.map((p) => (
+                <option key={p} value={p}>
+                  {p}
+                </option>
+              ))}
+            </select>
+          </div>
+        </div>
+      </aside>
 
-        <section className="glass canvas-board" onClick={() => setSelectedNodeId(null)}>
-          <div className="canvas-surface" ref={surfaceRef}>
-            <svg className="canvas-edges" aria-hidden="true">
-              {visibleEdges.map((entry) => {
-                const source = nodeMap.get(entry.edge.source);
-                const target = nodeMap.get(entry.edge.target);
-                if (!source || !target) return null;
-                const x1 = source.position.x + source.size.w / 2;
-                const y1 = source.position.y + source.size.h / 2;
-                const x2 = target.position.x + target.size.w / 2;
-                const y2 = target.position.y + target.size.h / 2;
-                return (
-                  <line
-                    key={`${entry.scope}:${entry.edge.id}`}
-                    x1={x1}
-                    y1={y1}
-                    x2={x2}
-                    y2={y2}
-                    className={`edge-line ${entry.scope === "cross" ? "cross" : ""}`}
-                  />
-                );
-              })}
-            </svg>
-            {visibleNodes.map((node) => (
-              <div
-                key={node.id}
-                className={`canvas-node ${selectedNodeId === node.id ? "selected" : ""} ${connectFromId === node.id ? "connect-source" : ""}`}
-                style={{ left: node.position.x, top: node.position.y, width: node.size.w, height: node.size.h }}
-                onPointerDown={(event) => startDrag(event, node)}
-                onClick={(event) => {
-                  event.stopPropagation();
-                  handleNodeClick(node);
-                }}
+      {/* Floating Right Dock (Inspector) */}
+      <aside
+        className="glass-panel layer-dock animate-fade-in"
+        style={{ left: "auto", right: 24, top: 100 }}
+      >
+        {selectedNode ? (
+          <div className="flex-col" style={{ gap: 12 }}>
+            <div
+              className="node-header"
+              style={{ padding: 0, border: "none", background: "transparent" }}
+            >
+              <span className="eyebrow">Inspector</span>
+              <button
+                className="btn danger small"
+                onClick={() => deleteNode(selectedNode.id)}
               >
-                <div className="node-header">
-                  <span className="node-type">{node.type}</span>
-                  <span className="node-status">{node.status}</span>
-                </div>
-                <strong>{node.label}</strong>
-                <p>{node.summary}</p>
-              </div>
-            ))}
-          </div>
-        </section>
+                Delete Node
+              </button>
+            </div>
 
-        <aside className="glass canvas-panel">
-          <h2>Inspector</h2>
-          {selectedNode ? (
-            <div className="stack">
-              <div className="row between">
-                <strong>{selectedNode.label}</strong>
-                <button className="btn small" onClick={() => deleteNode(selectedNode.id)}>Delete</button>
-              </div>
+            <input
+              value={selectedNode.label}
+              onChange={(e) =>
+                updateNode(selectedNode.id, { label: e.target.value })
+              }
+              style={{
+                fontSize: "1.1rem",
+                fontWeight: 600,
+                background: "transparent",
+                border: "none",
+                padding: 0,
+                color: "var(--teal-glow)",
+              }}
+            />
+
+            <textarea
+              value={selectedNode.summary}
+              onChange={(e) =>
+                updateNode(selectedNode.id, { summary: e.target.value })
+              }
+              style={{ minHeight: 80, fontSize: "0.9rem", lineHeight: 1.5 }}
+            />
+
+            <div className="grid two">
               <label>
-                Label
-                <input value={selectedNode.label} onChange={(e) => updateNode(selectedNode.id, { label: e.target.value })} />
-              </label>
-              <label>
-                Summary
-                <textarea
-                  value={selectedNode.summary}
-                  onChange={(e) => updateNode(selectedNode.id, { summary: e.target.value })}
-                />
-              </label>
-              <div className="grid two">
-                <label>
+                <span className="eyebrow" style={{ fontSize: "0.65rem" }}>
                   Type
-                  <select value={selectedNode.type} onChange={(e) => updateNode(selectedNode.id, { type: e.target.value })}>
-                    {NODE_TYPES.map((type) => (
-                      <option key={type} value={type}>{type}</option>
-                    ))}
-                  </select>
-                </label>
-                <label>
-                  Status
-                  <select value={selectedNode.status} onChange={(e) => updateNode(selectedNode.id, { status: e.target.value })}>
-                    {NODE_STATUSES.map((status) => (
-                      <option key={status} value={status}>{status}</option>
-                    ))}
-                  </select>
-                </label>
-              </div>
-              <label>
-                Priority
-                <select value={selectedNode.priority || "medium"} onChange={(e) => updateNode(selectedNode.id, { priority: e.target.value })}>
-                  {NODE_PRIORITIES.map((priority) => (
-                    <option key={priority} value={priority}>{priority}</option>
-                  ))}
-                </select>
-              </label>
-              <div className="grid two">
-                <label>
-                  X
-                  <input
-                    value={selectedNode.position.x}
-                    onChange={(e) => updateNode(selectedNode.id, { position: { ...selectedNode.position, x: Number(e.target.value) || 0 } })}
-                  />
-                </label>
-                <label>
-                  Y
-                  <input
-                    value={selectedNode.position.y}
-                    onChange={(e) => updateNode(selectedNode.id, { position: { ...selectedNode.position, y: Number(e.target.value) || 0 } })}
-                  />
-                </label>
-              </div>
-              <div className="grid two">
-                <label>
-                  Width
-                  <input
-                    value={selectedNode.size.w}
-                    onChange={(e) => updateNode(selectedNode.id, { size: { ...selectedNode.size, w: Number(e.target.value) || 1 } })}
-                  />
-                </label>
-                <label>
-                  Height
-                  <input
-                    value={selectedNode.size.h}
-                    onChange={(e) => updateNode(selectedNode.id, { size: { ...selectedNode.size, h: Number(e.target.value) || 1 } })}
-                  />
-                </label>
-              </div>
-              <label>
-                Acceptance criteria (one per line)
-                <textarea
-                  value={(selectedNode.acceptance_criteria || []).join("\n")}
-                  onChange={(e) => updateNode(selectedNode.id, { acceptance_criteria: splitLines(e.target.value) })}
-                />
-              </label>
-              <label>
-                Details markdown
-                <textarea
-                  value={selectedNode.details_markdown || ""}
-                  onChange={(e) => updateNode(selectedNode.id, { details_markdown: e.target.value })}
-                />
-              </label>
-              <label>
-                Tags (comma separated)
-                <input
-                  value={(selectedNode.tags || []).join(", ")}
-                  onChange={(e) => updateNode(selectedNode.id, { tags: splitLines(e.target.value.replace(/,/g, "\n")) })}
-                />
-              </label>
-            </div>
-          ) : (
-            <p className="subtle">Select a node to edit details.</p>
-          )}
-
-          <h3>Edges</h3>
-          <div className="stack">
-            {visibleEdges.length === 0 ? (
-              <p className="subtle">No edges in current filters.</p>
-            ) : (
-              visibleEdges.map((entry) => {
-                const source = nodeMap.get(entry.edge.source);
-                const target = nodeMap.get(entry.edge.target);
-                const edgeKey = `${entry.scope}:${entry.edge.id}`;
-                return (
-                  <div key={edgeKey} className={`edge-card ${selectedEdgeKey === edgeKey ? "active" : ""}`}>
-                    <button className="edge-link" onClick={() => setSelectedEdgeKey(edgeKey)}>
-                      {source?.label || entry.edge.source} → {target?.label || entry.edge.target}
-                    </button>
-                    <span className="mono">{entry.edge.relation}</span>
-                    <button className="btn small" onClick={() => deleteEdge(entry.scope, entry.edge.id)}>Delete</button>
-                  </div>
-                );
-              })
-            )}
-          </div>
-
-          {selectedEdge?.edge ? (
-            <div className="stack">
-              <h4>Edge Details</h4>
-              <label>
-                Relation
+                </span>
                 <select
-                  value={selectedEdge.edge.relation}
-                  onChange={(e) => updateEdge(selectedEdge.scope, selectedEdge.edge.id, { relation: e.target.value })}
+                  value={selectedNode.type}
+                  onChange={(e) =>
+                    updateNode(selectedNode.id, { type: e.target.value })
+                  }
                 >
-                  {EDGE_RELATIONS.map((relation) => (
-                    <option key={relation} value={relation}>{relation}</option>
+                  {NODE_TYPES.map((t) => (
+                    <option key={t} value={t}>
+                      {t}
+                    </option>
                   ))}
                 </select>
               </label>
-              <label className="check">
-                <input
-                  type="checkbox"
-                  checked={selectedEdge.edge.required ?? true}
-                  onChange={(e) => updateEdge(selectedEdge.scope, selectedEdge.edge.id, { required: e.target.checked })}
-                />
-                Required edge
-              </label>
               <label>
-                Notes
-                <textarea
-                  value={selectedEdge.edge.notes || ""}
-                  onChange={(e) => updateEdge(selectedEdge.scope, selectedEdge.edge.id, { notes: e.target.value })}
-                />
-              </label>
-              <label>
-                Gates (one per line)
-                <textarea
-                  value={(selectedEdge.edge.gates || []).join("\n")}
-                  onChange={(e) => updateEdge(selectedEdge.scope, selectedEdge.edge.id, { gates: splitLines(e.target.value) })}
-                />
+                <span className="eyebrow" style={{ fontSize: "0.65rem" }}>
+                  Status
+                </span>
+                <select
+                  value={selectedNode.status}
+                  onChange={(e) =>
+                    updateNode(selectedNode.id, { status: e.target.value })
+                  }
+                >
+                  {NODE_STATUSES.map((s) => (
+                    <option key={s} value={s}>
+                      {s}
+                    </option>
+                  ))}
+                </select>
               </label>
             </div>
-          ) : null}
 
-          <h3>Export</h3>
-          {validationErrors.length > 0 ? (
-            <div className="notice error">
-              <strong>Validation issues</strong>
-              <ul>
-                {validationErrors.map((err) => (
-                  <li key={err}>{err}</li>
+            <label>
+              <span className="eyebrow" style={{ fontSize: "0.65rem" }}>
+                Priority
+              </span>
+              <select
+                value={selectedNode.priority || "medium"}
+                onChange={(e) =>
+                  updateNode(selectedNode.id, { priority: e.target.value })
+                }
+              >
+                {NODE_PRIORITIES.map((p) => (
+                  <option key={p} value={p}>
+                    {p}
+                  </option>
                 ))}
-              </ul>
+              </select>
+            </label>
+
+            <div style={{ marginTop: 8 }}>
+              <p className="eyebrow">
+                Edges (
+                {
+                  visibleEdges.filter(
+                    (e) =>
+                      e.edge.source === selectedNode.id ||
+                      e.edge.target === selectedNode.id,
+                  ).length
+                }
+                )
+              </p>
             </div>
-          ) : (
-            <p className="subtle">Plan passes schema checks and is ready to export.</p>
-          )}
-          <div className="button-row">
-            <button className="btn" disabled={validationErrors.length > 0} onClick={copyExport}>Copy JSON</button>
-            <button className="btn accent" disabled={validationErrors.length > 0} onClick={downloadExport}>Download</button>
           </div>
-          <pre className="export-preview">{exportJson}</pre>
-        </aside>
+        ) : (
+          <div className="flex-col" style={{ gap: 12 }}>
+            <span className="eyebrow">Add Node</span>
+            <input
+              value={addNodeForm.label}
+              onChange={(e) =>
+                setAddNodeForm((f) => ({ ...f, label: e.target.value }))
+              }
+              placeholder="Node Label"
+            />
+            <textarea
+              value={addNodeForm.summary}
+              onChange={(e) =>
+                setAddNodeForm((f) => ({ ...f, summary: e.target.value }))
+              }
+              placeholder="Objective Summary..."
+            />
+            <div className="grid two">
+              <select
+                value={addNodeForm.type}
+                onChange={(e) =>
+                  setAddNodeForm((f) => ({ ...f, type: e.target.value }))
+                }
+              >
+                {NODE_TYPES.map((t) => (
+                  <option key={t} value={t}>
+                    {t}
+                  </option>
+                ))}
+              </select>
+              <select
+                value={addNodeForm.priority}
+                onChange={(e) =>
+                  setAddNodeForm((f) => ({ ...f, priority: e.target.value }))
+                }
+              >
+                {NODE_PRIORITIES.map((p) => (
+                  <option key={p} value={p}>
+                    {p}
+                  </option>
+                ))}
+              </select>
+            </div>
+            <button className="btn primary" onClick={addNode}>
+              Create Node
+            </button>
+
+            <div
+              style={{
+                marginTop: 20,
+                padding: 10,
+                background: "rgba(255,255,255,0.05)",
+                borderRadius: 8,
+              }}
+            >
+              <p className="eyebrow">Export Preview</p>
+              <div className="flex-between">
+                <span className="badge pending" style={{ fontSize: "0.7rem" }}>
+                  {validationErrors.length} Errors
+                </span>
+                <button className="btn small ghost" onClick={copyExport}>
+                  Copy
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
+      </aside>
+
+      {message && (
+        <div
+          className="glass-panel animate-fade-in"
+          style={{
+            position: "fixed",
+            bottom: 24,
+            left: "50%",
+            transform: "translateX(-50%)",
+            padding: "12px 24px",
+            zIndex: 200,
+            color: "var(--amber-glow)",
+            fontWeight: 500,
+          }}
+        >
+          {message}
+        </div>
+      )}
+
+      {/* Canvas Surface */}
+      <section
+        className="canvas-surface"
+        ref={surfaceRef}
+        onPointerDown={handleCanvasPointerDown}
+        onWheel={handleWheel}
+        style={{
+          transform: `translate(${viewport.x}px, ${viewport.y}px) scale(${viewport.zoom})`,
+          cursor: isPanning ? "grabbing" : "grab",
+        }}
+        onClick={() => setSelectedNodeId(null)}
+      >
+        <svg className="canvas-edges" style={{ overflow: "visible" }}>
+          <defs>
+            <marker
+              id="arrowhead"
+              markerWidth="10"
+              markerHeight="7"
+              refX="28"
+              refY="3.5"
+              orient="auto"
+            >
+              <polygon points="0 0, 10 3.5, 0 7" fill="var(--ink-muted)" />
+            </marker>
+            <marker
+              id="arrowhead-hover"
+              markerWidth="10"
+              markerHeight="7"
+              refX="28"
+              refY="3.5"
+              orient="auto"
+            >
+              <polygon points="0 0, 10 3.5, 0 7" fill="var(--teal-glow)" />
+            </marker>
+          </defs>
+          {visibleEdges.map((entry) => {
+            const source = nodeMap.get(entry.edge.source);
+            const target = nodeMap.get(entry.edge.target);
+            if (!source || !target) return null;
+            const x1 = source.position.x + source.size.w / 2;
+            const y1 = source.position.y + source.size.h / 2;
+            const x2 = target.position.x + target.size.w / 2;
+            const y2 = target.position.y + target.size.h / 2;
+            const edgeKey = `${entry.scope}:${entry.edge.id}`;
+            const pathD = getEdgePath(x1, y1, x2, y2);
+
+            return (
+              <path
+                key={edgeKey}
+                d={pathD}
+                className={`edge-path ${entry.scope === "cross" ? "cross" : ""} ${selectedEdgeKey === edgeKey ? "selected" : ""}`}
+                markerEnd={
+                  selectedEdgeKey === edgeKey
+                    ? "url(#arrowhead-hover)"
+                    : "url(#arrowhead)"
+                }
+                onClick={(e) => {
+                  e.stopPropagation();
+                  setSelectedEdgeKey(edgeKey);
+                }}
+                style={{ fill: "none" }}
+              />
+            );
+          })}
+        </svg>
+
+        {visibleNodes.map((node) => (
+          <div
+            key={node.id}
+            className={`canvas-node ${selectedNodeId === node.id ? "selected" : ""} ${connectFromId === node.id ? "connect-source" : ""}`}
+            style={{
+              left: node.position.x,
+              top: node.position.y,
+              width: node.size.w,
+              height: node.size.h,
+            }}
+            onPointerDown={(event) => startDrag(event, node)}
+            onClick={(event) => {
+              event.stopPropagation();
+              handleNodeClick(node);
+            }}
+          >
+            <div className="node-header">
+              <span className="node-label">{node.type}</span>
+              <span
+                className={`badge ${node.status === "completed" ? "success" : "pending"}`}
+              >
+                {node.status}
+              </span>
+            </div>
+            <div className="node-body">
+              <div className="node-title">{node.label}</div>
+              <div className="node-summary">{node.summary}</div>
+            </div>
+          </div>
+        ))}
       </section>
     </main>
   );
@@ -1333,8 +1506,13 @@ function ParallelWorldsDashboardView() {
 
   const eventSourceRef = useRef(null);
 
-  async function loadDashboard(branchpoint = selectedBranchpoint, initial = false) {
-    const query = branchpoint ? `?branchpoint=${encodeURIComponent(branchpoint)}` : "";
+  async function loadDashboard(
+    branchpoint = selectedBranchpoint,
+    initial = false,
+  ) {
+    const query = branchpoint
+      ? `?branchpoint=${encodeURIComponent(branchpoint)}`
+      : "";
     if (initial) setLoading(true);
     else setRefreshing(true);
     setError("");
@@ -1388,8 +1566,12 @@ function ParallelWorldsDashboardView() {
 
     try {
       const [summaryPayload, diagramPayload] = await Promise.all([
-        readJson(`${RUNS_API_PREFIX}/runs/${encodeURIComponent(normalizedRunId)}`),
-        readJson(`${RUNS_API_PREFIX}/runs/${encodeURIComponent(normalizedRunId)}/diagram`),
+        readJson(
+          `${RUNS_API_PREFIX}/runs/${encodeURIComponent(normalizedRunId)}`,
+        ),
+        readJson(
+          `${RUNS_API_PREFIX}/runs/${encodeURIComponent(normalizedRunId)}/diagram`,
+        ),
       ]);
 
       const nextSummary = unwrapData(summaryPayload);
@@ -1399,7 +1581,9 @@ function ParallelWorldsDashboardView() {
       setRunDiagram(nextDiagram);
 
       if (nextDiagram.nodes.length > 0) {
-        const stillExists = nextDiagram.nodes.some((node) => node.taskId === selectedTaskId);
+        const stillExists = nextDiagram.nodes.some(
+          (node) => node.taskId === selectedTaskId,
+        );
         if (!stillExists) {
           setSelectedTaskId(nextDiagram.nodes[0].taskId);
         }
@@ -1425,7 +1609,9 @@ function ParallelWorldsDashboardView() {
     setEventStreamStatus("connecting");
     setRunProgressError("");
 
-    const source = new EventSource(`${RUNS_API_PREFIX}/runs/${encodeURIComponent(normalizedRunId)}/events`);
+    const source = new EventSource(
+      `${RUNS_API_PREFIX}/runs/${encodeURIComponent(normalizedRunId)}/events`,
+    );
     eventSourceRef.current = source;
 
     source.onopen = () => {
@@ -1437,7 +1623,9 @@ function ParallelWorldsDashboardView() {
       setRunEvents((prev) => [row, ...prev].slice(0, 250));
       if (row.taskId && row.status) {
         setRunDiagram((prev) => {
-          const nextNodes = prev.nodes.map((node) => (node.taskId === row.taskId ? { ...node, status: row.status } : node));
+          const nextNodes = prev.nodes.map((node) =>
+            node.taskId === row.taskId ? { ...node, status: row.status } : node,
+          );
           return { ...prev, nodes: nextNodes };
         });
       }
@@ -1455,9 +1643,14 @@ function ParallelWorldsDashboardView() {
 
     setTaskArtifactsLoading(true);
     try {
-      const payload = await readJson(`${RUNS_API_PREFIX}/tasks/${encodeURIComponent(normalizedTaskId)}/artifacts`);
+      const payload = await readJson(
+        `${RUNS_API_PREFIX}/tasks/${encodeURIComponent(normalizedTaskId)}/artifacts`,
+      );
       const artifacts = normalizeArtifacts(payload);
-      setTaskArtifactsById((prev) => ({ ...prev, [normalizedTaskId]: artifacts }));
+      setTaskArtifactsById((prev) => ({
+        ...prev,
+        [normalizedTaskId]: artifacts,
+      }));
     } catch (err) {
       setTaskArtifactsById((prev) => ({
         ...prev,
@@ -1484,11 +1677,14 @@ function ParallelWorldsDashboardView() {
     setTaskActionBusy(true);
     setRunProgressError("");
     try {
-      await readJson(`${RUNS_API_PREFIX}/tasks/${encodeURIComponent(taskId)}/${action}`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(body),
-      });
+      await readJson(
+        `${RUNS_API_PREFIX}/tasks/${encodeURIComponent(taskId)}/${action}`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(body),
+        },
+      );
       await loadRunProgress(activeRunId, { initial: false });
       if (action === "steer") {
         setSteerForm({ comment: "", promptPatch: "" });
@@ -1523,25 +1719,42 @@ function ParallelWorldsDashboardView() {
     return `${branchpoint.id} (${branchpoint.status || "created"})`;
   }, [branchpoint]);
 
-  const selectedTask = useMemo(() => runDiagram.nodes.find((node) => node.taskId === selectedTaskId) || null, [runDiagram.nodes, selectedTaskId]);
+  const selectedTask = useMemo(
+    () =>
+      runDiagram.nodes.find((node) => node.taskId === selectedTaskId) || null,
+    [runDiagram.nodes, selectedTaskId],
+  );
 
-  const runStatusCounts = useMemo(() => statusCountsFromNodes(runDiagram.nodes), [runDiagram.nodes]);
+  const runStatusCounts = useMemo(
+    () => statusCountsFromNodes(runDiagram.nodes),
+    [runDiagram.nodes],
+  );
 
   const completionPct = useMemo(() => {
-    if (runSummary?.completion_pct !== undefined && runSummary?.completion_pct !== null) {
+    if (
+      runSummary?.completion_pct !== undefined &&
+      runSummary?.completion_pct !== null
+    ) {
       return fmtPct(runSummary.completion_pct);
     }
     const total = runDiagram.nodes.length;
     if (!total) return "0%";
-    const terminal = runStatusCounts.done + runStatusCounts.failed + runStatusCounts.stopped;
+    const terminal =
+      runStatusCounts.done + runStatusCounts.failed + runStatusCounts.stopped;
     return fmtPct((terminal / total) * 100);
   }, [runSummary, runDiagram.nodes.length, runStatusCounts]);
 
   const activeAgents = useMemo(() => {
-    if (runSummary?.active_agents !== undefined && runSummary?.active_agents !== null) {
+    if (
+      runSummary?.active_agents !== undefined &&
+      runSummary?.active_agents !== null
+    ) {
       return String(runSummary.active_agents);
     }
-    if (runSummary?.counts?.running !== undefined && runSummary?.counts?.running !== null) {
+    if (
+      runSummary?.counts?.running !== undefined &&
+      runSummary?.counts?.running !== null
+    ) {
       return String(runSummary.counts.running);
     }
     return String(runStatusCounts.running || 0);
@@ -1558,13 +1771,17 @@ function ParallelWorldsDashboardView() {
     if (taskEvents.length === 0) return "No logs captured for this task yet.";
     return taskEvents
       .map((evt) => {
-        const stamp = evt.createdAt ? new Date(evt.createdAt).toLocaleTimeString() : "--:--:--";
+        const stamp = evt.createdAt
+          ? new Date(evt.createdAt).toLocaleTimeString()
+          : "--:--:--";
         return `[${stamp}] ${evt.type}: ${evt.detail}`;
       })
       .join("\n");
   }, [selectedTask, taskEvents]);
 
-  const selectedArtifacts = selectedTaskId ? taskArtifactsById[selectedTaskId] || [] : [];
+  const selectedArtifacts = selectedTaskId
+    ? taskArtifactsById[selectedTaskId] || []
+    : [];
 
   async function postAction(action, payload, opts = {}) {
     const { refresh = true, switchToLatest = false } = opts;
@@ -1596,7 +1813,9 @@ function ParallelWorldsDashboardView() {
     setArtifactText("");
     setError("");
     try {
-      const payload = await readJson(`${API_BASE}/api/artifact?name=${encodeURIComponent(name)}`);
+      const payload = await readJson(
+        `${API_BASE}/api/artifact?name=${encodeURIComponent(name)}`,
+      );
       setArtifactText(payload.text || "");
     } catch (err) {
       setError(err.message);
@@ -1665,10 +1884,17 @@ function ParallelWorldsDashboardView() {
           </p>
         </div>
         <div className="hero-actions">
-          <button className="btn ghost" disabled={refreshing || busy} onClick={() => loadDashboard(selectedBranchpoint, false)}>
+          <button
+            className="btn ghost"
+            disabled={refreshing || busy}
+            onClick={() => loadDashboard(selectedBranchpoint, false)}
+          >
             {refreshing ? "Refreshing..." : "Refresh"}
           </button>
-          <button className="btn ghost" onClick={() => openArtifact("report.md")}>
+          <button
+            className="btn ghost"
+            onClick={() => openArtifact("report.md")}
+          >
             Open report.md
           </button>
           <button className="btn ghost" onClick={() => openArtifact("play.md")}>
@@ -1694,7 +1920,9 @@ function ParallelWorldsDashboardView() {
           <div>
             <p className="eyebrow">Symphony Operator View</p>
             <h2>Run Progress</h2>
-            <p className="subtle">Monitor DAG execution and steer active tasks from one panel.</p>
+            <p className="subtle">
+              Monitor DAG execution and steer active tasks from one panel.
+            </p>
           </div>
           <div className="progress-actions">
             <input
@@ -1703,22 +1931,41 @@ function ParallelWorldsDashboardView() {
               placeholder="run-id"
               aria-label="Run ID"
             />
-            <button className="btn" disabled={runProgressLoading || !runIdInput.trim()} onClick={() => loadRunProgress(runIdInput.trim(), { initial: true })}>
+            <button
+              className="btn"
+              disabled={runProgressLoading || !runIdInput.trim()}
+              onClick={() =>
+                loadRunProgress(runIdInput.trim(), { initial: true })
+              }
+            >
               {runProgressLoading ? "Loading..." : "Load Run"}
             </button>
-            <button className="btn ghost" disabled={!activeRunId || runProgressRefreshing} onClick={() => loadRunProgress(activeRunId, { initial: false })}>
+            <button
+              className="btn ghost"
+              disabled={!activeRunId || runProgressRefreshing}
+              onClick={() => loadRunProgress(activeRunId, { initial: false })}
+            >
               {runProgressRefreshing ? "Refreshing..." : "Refresh Run"}
             </button>
-            {eventStreamStatus === "live" || eventStreamStatus === "connecting" ? (
+            {eventStreamStatus === "live" ||
+            eventStreamStatus === "connecting" ? (
               <button className="btn ghost" onClick={closeRunEventStream}>
                 Disconnect Events
               </button>
             ) : (
-              <button className="btn ghost" disabled={!activeRunId} onClick={() => connectRunEventStream(activeRunId)}>
+              <button
+                className="btn ghost"
+                disabled={!activeRunId}
+                onClick={() => connectRunEventStream(activeRunId)}
+              >
                 Connect Events
               </button>
             )}
-            <button className="btn ghost" disabled={!activeRunId} onClick={clearRunProgress}>
+            <button
+              className="btn ghost"
+              disabled={!activeRunId}
+              onClick={clearRunProgress}
+            >
               Clear
             </button>
           </div>
@@ -1737,7 +1984,9 @@ function ParallelWorldsDashboardView() {
           </article>
           <article className="kpi-card">
             <p>Status</p>
-            <strong className={`run-pill ${runStatusTone(runSummary?.status)}`}>{String(runSummary?.status || "pending")}</strong>
+            <strong className={`run-pill ${runStatusTone(runSummary?.status)}`}>
+              {String(runSummary?.status || "pending")}
+            </strong>
           </article>
           <article className="kpi-card">
             <p>Active agents</p>
@@ -1765,7 +2014,9 @@ function ParallelWorldsDashboardView() {
           <section className="diagram-panel">
             <header>
               <h3>DAG Tasks</h3>
-              <p className="subtle">{runDiagram.edges.length} dependency edges</p>
+              <p className="subtle">
+                {runDiagram.edges.length} dependency edges
+              </p>
             </header>
             {runDiagram.nodes.length === 0 ? (
               <p className="subtle">Load a run to render task nodes.</p>
@@ -1781,7 +2032,9 @@ function ParallelWorldsDashboardView() {
                     }}
                   >
                     <span className="dag-node-title">{node.title}</span>
-                    <span className={`dag-node-status ${node.status}`}>{node.status}</span>
+                    <span className={`dag-node-status ${node.status}`}>
+                      {node.status}
+                    </span>
                     <span className="dag-node-id mono">{node.taskId}</span>
                   </button>
                 ))}
@@ -1796,14 +2049,20 @@ function ParallelWorldsDashboardView() {
             </header>
             <div className="event-feed">
               {runEvents.length === 0 ? (
-                <p className="subtle">No events yet. Connect stream or refresh run.</p>
+                <p className="subtle">
+                  No events yet. Connect stream or refresh run.
+                </p>
               ) : (
                 runEvents.map((event) => (
                   <article key={event.id} className="event-row">
                     <div className="event-row-head">
                       <strong>{event.type}</strong>
                       <span className="subtle">{event.taskId || "run"}</span>
-                      <span className={`status-chip tiny ${event.status || "pending"}`}>{event.status || "info"}</span>
+                      <span
+                        className={`status-chip tiny ${event.status || "pending"}`}
+                      >
+                        {event.status || "info"}
+                      </span>
                     </div>
                     <p className="subtle">{event.detail}</p>
                   </article>
@@ -1822,21 +2081,45 @@ function ParallelWorldsDashboardView() {
               <>
                 <article className="task-meta-card">
                   <h4>{selectedTask.title}</h4>
-                  <p className="subtle">{selectedTask.objective || "No objective provided."}</p>
+                  <p className="subtle">
+                    {selectedTask.objective || "No objective provided."}
+                  </p>
                   <div className="status-counter-row compact">
-                    <span className={`status-chip ${selectedTask.status}`}>{selectedTask.status}</span>
-                    <span className="status-chip pending">priority: {selectedTask.priority ?? "n/a"}</span>
+                    <span className={`status-chip ${selectedTask.status}`}>
+                      {selectedTask.status}
+                    </span>
+                    <span className="status-chip pending">
+                      priority: {selectedTask.priority ?? "n/a"}
+                    </span>
                   </div>
                 </article>
 
                 <div className="button-row">
-                  <button className="btn small" disabled={taskActionBusy} onClick={() => taskControlAction(selectedTask.taskId, "pause")}>
+                  <button
+                    className="btn small"
+                    disabled={taskActionBusy}
+                    onClick={() =>
+                      taskControlAction(selectedTask.taskId, "pause")
+                    }
+                  >
                     Pause
                   </button>
-                  <button className="btn small" disabled={taskActionBusy} onClick={() => taskControlAction(selectedTask.taskId, "resume")}>
+                  <button
+                    className="btn small"
+                    disabled={taskActionBusy}
+                    onClick={() =>
+                      taskControlAction(selectedTask.taskId, "resume")
+                    }
+                  >
                     Resume
                   </button>
-                  <button className="btn small accent" disabled={taskActionBusy} onClick={() => taskControlAction(selectedTask.taskId, "stop")}>
+                  <button
+                    className="btn small accent"
+                    disabled={taskActionBusy}
+                    onClick={() =>
+                      taskControlAction(selectedTask.taskId, "stop")
+                    }
+                  >
                     Stop
                   </button>
                 </div>
@@ -1845,7 +2128,12 @@ function ParallelWorldsDashboardView() {
                   Steering comment
                   <textarea
                     value={steerForm.comment}
-                    onChange={(e) => setSteerForm((prev) => ({ ...prev, comment: e.target.value }))}
+                    onChange={(e) =>
+                      setSteerForm((prev) => ({
+                        ...prev,
+                        comment: e.target.value,
+                      }))
+                    }
                     placeholder="Focus on deterministic retry behavior and include regression test coverage."
                   />
                 </label>
@@ -1853,7 +2141,12 @@ function ParallelWorldsDashboardView() {
                   Prompt patch (optional)
                   <textarea
                     value={steerForm.promptPatch}
-                    onChange={(e) => setSteerForm((prev) => ({ ...prev, promptPatch: e.target.value }))}
+                    onChange={(e) =>
+                      setSteerForm((prev) => ({
+                        ...prev,
+                        promptPatch: e.target.value,
+                      }))
+                    }
                     placeholder="Append: prioritize minimal diff and preserve public API compatibility."
                   />
                 </label>
@@ -1871,8 +2164,18 @@ function ParallelWorldsDashboardView() {
                 </button>
 
                 <div className="drawer-tabs">
-                  <button className={`tab-btn ${drawerTab === "logs" ? "active" : ""}`} onClick={() => setDrawerTab("logs")}>Logs</button>
-                  <button className={`tab-btn ${drawerTab === "artifacts" ? "active" : ""}`} onClick={() => setDrawerTab("artifacts")}>Artifacts</button>
+                  <button
+                    className={`tab-btn ${drawerTab === "logs" ? "active" : ""}`}
+                    onClick={() => setDrawerTab("logs")}
+                  >
+                    Logs
+                  </button>
+                  <button
+                    className={`tab-btn ${drawerTab === "artifacts" ? "active" : ""}`}
+                    onClick={() => setDrawerTab("artifacts")}
+                  >
+                    Artifacts
+                  </button>
                 </div>
 
                 {drawerTab === "logs" ? (
@@ -1880,21 +2183,40 @@ function ParallelWorldsDashboardView() {
                 ) : (
                   <div className="artifact-list">
                     <div className="artifact-actions">
-                      <button className="btn small" disabled={taskArtifactsLoading} onClick={() => loadTaskArtifacts(selectedTask.taskId, true)}>
-                        {taskArtifactsLoading ? "Refreshing..." : "Refresh Artifacts"}
+                      <button
+                        className="btn small"
+                        disabled={taskArtifactsLoading}
+                        onClick={() =>
+                          loadTaskArtifacts(selectedTask.taskId, true)
+                        }
+                      >
+                        {taskArtifactsLoading
+                          ? "Refreshing..."
+                          : "Refresh Artifacts"}
                       </button>
                     </div>
                     {selectedArtifacts.length === 0 ? (
                       <p className="subtle">No artifacts yet.</p>
                     ) : (
                       selectedArtifacts.map((item, idx) => (
-                        <article key={item.id || `artifact-${idx}`} className="artifact-row">
+                        <article
+                          key={item.id || `artifact-${idx}`}
+                          className="artifact-row"
+                        >
                           <div className="artifact-top">
                             <strong>{item.kind || "artifact"}</strong>
-                            <span className="subtle mono">{item.path || item.name || "inline"}</span>
+                            <span className="subtle mono">
+                              {item.path || item.name || "inline"}
+                            </span>
                           </div>
-                          {item.message ? <p className="subtle">{item.message}</p> : null}
-                          {item.content ? <pre className="drawer-pre">{String(item.content)}</pre> : null}
+                          {item.message ? (
+                            <p className="subtle">{item.message}</p>
+                          ) : null}
+                          {item.content ? (
+                            <pre className="drawer-pre">
+                              {String(item.content)}
+                            </pre>
+                          ) : null}
                         </article>
                       ))
                     )}
@@ -1902,7 +2224,9 @@ function ParallelWorldsDashboardView() {
                 )}
               </>
             ) : (
-              <p className="subtle">Select a DAG node to inspect logs, artifacts, and controls.</p>
+              <p className="subtle">
+                Select a DAG node to inspect logs, artifacts, and controls.
+              </p>
             )}
           </aside>
         </div>
@@ -1911,12 +2235,17 @@ function ParallelWorldsDashboardView() {
       <section className="layout">
         <article className="glass panel">
           <h2>Prompt Agent</h2>
-          <p className="subtle">One prompt can kickoff worlds, run codex/test execution, and optionally play render workflows.</p>
+          <p className="subtle">
+            One prompt can kickoff worlds, run codex/test execution, and
+            optionally play render workflows.
+          </p>
           <label>
             Prompt
             <textarea
               value={autopilot.prompt}
-              onChange={(e) => setAutopilot((s) => ({ ...s, prompt: e.target.value }))}
+              onChange={(e) =>
+                setAutopilot((s) => ({ ...s, prompt: e.target.value }))
+              }
               placeholder="Fix flaky checkout timeout and improve reliability."
             />
           </label>
@@ -1925,7 +2254,9 @@ function ParallelWorldsDashboardView() {
               World count
               <input
                 value={autopilot.count}
-                onChange={(e) => setAutopilot((s) => ({ ...s, count: e.target.value }))}
+                onChange={(e) =>
+                  setAutopilot((s) => ({ ...s, count: e.target.value }))
+                }
                 placeholder="3"
               />
             </label>
@@ -1933,7 +2264,9 @@ function ParallelWorldsDashboardView() {
               From ref (optional)
               <input
                 value={autopilot.fromRef}
-                onChange={(e) => setAutopilot((s) => ({ ...s, fromRef: e.target.value }))}
+                onChange={(e) =>
+                  setAutopilot((s) => ({ ...s, fromRef: e.target.value }))
+                }
                 placeholder="main"
               />
             </label>
@@ -1942,8 +2275,12 @@ function ParallelWorldsDashboardView() {
             Strategies (optional, one per line: <code>name::notes</code>)
             <textarea
               value={autopilot.strategies}
-              onChange={(e) => setAutopilot((s) => ({ ...s, strategies: e.target.value }))}
-              placeholder={"surgical-fix::minimal patch\nfix-plus-tests::add regression tests"}
+              onChange={(e) =>
+                setAutopilot((s) => ({ ...s, strategies: e.target.value }))
+              }
+              placeholder={
+                "surgical-fix::minimal patch\nfix-plus-tests::add regression tests"
+              }
             />
           </label>
           <div className="grid checks">
@@ -1951,7 +2288,9 @@ function ParallelWorldsDashboardView() {
               <input
                 type="checkbox"
                 checked={autopilot.run}
-                onChange={(e) => setAutopilot((s) => ({ ...s, run: e.target.checked }))}
+                onChange={(e) =>
+                  setAutopilot((s) => ({ ...s, run: e.target.checked }))
+                }
               />
               Run after kickoff
             </label>
@@ -1959,7 +2298,9 @@ function ParallelWorldsDashboardView() {
               <input
                 type="checkbox"
                 checked={autopilot.play}
-                onChange={(e) => setAutopilot((s) => ({ ...s, play: e.target.checked }))}
+                onChange={(e) =>
+                  setAutopilot((s) => ({ ...s, play: e.target.checked }))
+                }
               />
               Play after run
             </label>
@@ -1967,7 +2308,9 @@ function ParallelWorldsDashboardView() {
               <input
                 type="checkbox"
                 checked={autopilot.skipCodex}
-                onChange={(e) => setAutopilot((s) => ({ ...s, skipCodex: e.target.checked }))}
+                onChange={(e) =>
+                  setAutopilot((s) => ({ ...s, skipCodex: e.target.checked }))
+                }
               />
               Skip codex
             </label>
@@ -1975,7 +2318,9 @@ function ParallelWorldsDashboardView() {
               <input
                 type="checkbox"
                 checked={autopilot.skipRunner}
-                onChange={(e) => setAutopilot((s) => ({ ...s, skipRunner: e.target.checked }))}
+                onChange={(e) =>
+                  setAutopilot((s) => ({ ...s, skipRunner: e.target.checked }))
+                }
               />
               Skip runner
             </label>
@@ -2008,7 +2353,10 @@ function ParallelWorldsDashboardView() {
           <h2>Branchpoint Controls</h2>
           <label>
             Branchpoint
-            <select value={selectedBranchpoint} onChange={(e) => loadDashboard(e.target.value, false)}>
+            <select
+              value={selectedBranchpoint}
+              onChange={(e) => loadDashboard(e.target.value, false)}
+            >
               <option value="">Latest</option>
               {branchpoints.map((bp) => (
                 <option key={bp.id} value={bp.id}>
@@ -2023,20 +2371,29 @@ function ParallelWorldsDashboardView() {
             Intent
             <textarea
               value={kickoff.intent}
-              onChange={(e) => setKickoff((s) => ({ ...s, intent: e.target.value }))}
+              onChange={(e) =>
+                setKickoff((s) => ({ ...s, intent: e.target.value }))
+              }
               placeholder="Refactor auth module to reduce branch complexity."
             />
           </label>
           <div className="grid two">
             <label>
               Count
-              <input value={kickoff.count} onChange={(e) => setKickoff((s) => ({ ...s, count: e.target.value }))} />
+              <input
+                value={kickoff.count}
+                onChange={(e) =>
+                  setKickoff((s) => ({ ...s, count: e.target.value }))
+                }
+              />
             </label>
             <label>
               From ref
               <input
                 value={kickoff.fromRef}
-                onChange={(e) => setKickoff((s) => ({ ...s, fromRef: e.target.value }))}
+                onChange={(e) =>
+                  setKickoff((s) => ({ ...s, fromRef: e.target.value }))
+                }
                 placeholder="main"
               />
             </label>
@@ -2045,7 +2402,9 @@ function ParallelWorldsDashboardView() {
             Strategies (optional)
             <textarea
               value={kickoff.strategies}
-              onChange={(e) => setKickoff((s) => ({ ...s, strategies: e.target.value }))}
+              onChange={(e) =>
+                setKickoff((s) => ({ ...s, strategies: e.target.value }))
+              }
               placeholder="thin-refactor::extract boundaries"
             />
           </label>
@@ -2071,14 +2430,21 @@ function ParallelWorldsDashboardView() {
           <h3>Run / Play</h3>
           <label>
             World filter(s), comma or space separated
-            <input value={runForm.worlds} onChange={(e) => setRunForm((s) => ({ ...s, worlds: e.target.value }))} />
+            <input
+              value={runForm.worlds}
+              onChange={(e) =>
+                setRunForm((s) => ({ ...s, worlds: e.target.value }))
+              }
+            />
           </label>
           <div className="grid checks">
             <label className="check">
               <input
                 type="checkbox"
                 checked={runForm.skipCodex}
-                onChange={(e) => setRunForm((s) => ({ ...s, skipCodex: e.target.checked }))}
+                onChange={(e) =>
+                  setRunForm((s) => ({ ...s, skipCodex: e.target.checked }))
+                }
               />
               Skip codex
             </label>
@@ -2086,7 +2452,9 @@ function ParallelWorldsDashboardView() {
               <input
                 type="checkbox"
                 checked={runForm.skipRunner}
-                onChange={(e) => setRunForm((s) => ({ ...s, skipRunner: e.target.checked }))}
+                onChange={(e) =>
+                  setRunForm((s) => ({ ...s, skipRunner: e.target.checked }))
+                }
               />
               Skip runner
             </label>
@@ -2123,13 +2491,20 @@ function ParallelWorldsDashboardView() {
           <div className="grid two">
             <label>
               Play worlds
-              <input value={playForm.worlds} onChange={(e) => setPlayForm((s) => ({ ...s, worlds: e.target.value }))} />
+              <input
+                value={playForm.worlds}
+                onChange={(e) =>
+                  setPlayForm((s) => ({ ...s, worlds: e.target.value }))
+                }
+              />
             </label>
             <label>
               Render timeout
               <input
                 value={playForm.timeout}
-                onChange={(e) => setPlayForm((s) => ({ ...s, timeout: e.target.value }))}
+                onChange={(e) =>
+                  setPlayForm((s) => ({ ...s, timeout: e.target.value }))
+                }
                 placeholder="180"
               />
             </label>
@@ -2138,7 +2513,9 @@ function ParallelWorldsDashboardView() {
             Render command override
             <input
               value={playForm.renderCommand}
-              onChange={(e) => setPlayForm((s) => ({ ...s, renderCommand: e.target.value }))}
+              onChange={(e) =>
+                setPlayForm((s) => ({ ...s, renderCommand: e.target.value }))
+              }
               placeholder="npm run dev:smoke"
             />
           </label>
@@ -2146,7 +2523,9 @@ function ParallelWorldsDashboardView() {
             Preview lines
             <input
               value={playForm.previewLines}
-              onChange={(e) => setPlayForm((s) => ({ ...s, previewLines: e.target.value }))}
+              onChange={(e) =>
+                setPlayForm((s) => ({ ...s, previewLines: e.target.value }))
+              }
               placeholder="25"
             />
           </label>
@@ -2157,11 +2536,14 @@ function ParallelWorldsDashboardView() {
         <div className="worlds-header">
           <h2>World Blocks</h2>
           <p className="subtle">
-            Click <strong>Fork</strong> on any block to split a new branchpoint from that world branch.
+            Click <strong>Fork</strong> on any block to split a new branchpoint
+            from that world branch.
           </p>
         </div>
         {worldRows.length === 0 ? (
-          <p className="subtle">No worlds yet. Create one with Kickoff or Prompt Agent.</p>
+          <p className="subtle">
+            No worlds yet. Create one with Kickoff or Prompt Agent.
+          </p>
         ) : (
           <div className="world-grid">
             {worldRows.map((row) => {
@@ -2170,43 +2552,95 @@ function ParallelWorldsDashboardView() {
               const codex = row.codex;
               const render = row.render;
               return (
-                <article key={world.id} className={`world-card tone-${statusTone(world.status)}`}>
+                <article
+                  key={world.id}
+                  className={`world-card tone-${statusTone(world.status)}`}
+                >
                   <div className="world-head">
                     <h3>
                       {String(world.index).padStart(2, "0")} {world.name}
                     </h3>
-                    <span className={`status ${statusTone(world.status)}`}>{world.status || "ready"}</span>
+                    <span className={`status ${statusTone(world.status)}`}>
+                      {world.status || "ready"}
+                    </span>
                   </div>
                   <p className="mono">{world.branch}</p>
-                  <p className="subtle">{world.notes || "No strategy notes."}</p>
+                  <p className="subtle">
+                    {world.notes || "No strategy notes."}
+                  </p>
                   <div className="metrics">
-                    <span>Codex: {codex ? codex.exit_code ?? "n/a" : "n/a"}</span>
+                    <span>
+                      Codex: {codex ? codex.exit_code ?? "n/a" : "n/a"}
+                    </span>
                     <span>Run: {run ? run.exit_code ?? "n/a" : "n/a"}</span>
-                    <span>Render: {render ? render.exit_code ?? "n/a" : "n/a"}</span>
+                    <span>
+                      Render: {render ? render.exit_code ?? "n/a" : "n/a"}
+                    </span>
                     <span>Run time: {fmtDuration(run?.duration_sec)}</span>
                   </div>
                   <div className="button-row">
-                    <button className="btn small" disabled={busy} onClick={() => postAction("run", { branchpoint: selectedBranchpoint || "", worlds: world.id })}>
+                    <button
+                      className="btn small"
+                      disabled={busy}
+                      onClick={() =>
+                        postAction("run", {
+                          branchpoint: selectedBranchpoint || "",
+                          worlds: world.id,
+                        })
+                      }
+                    >
                       Run
                     </button>
-                    <button className="btn small" disabled={busy} onClick={() => postAction("play", { branchpoint: selectedBranchpoint || "", worlds: world.id })}>
+                    <button
+                      className="btn small"
+                      disabled={busy}
+                      onClick={() =>
+                        postAction("play", {
+                          branchpoint: selectedBranchpoint || "",
+                          worlds: world.id,
+                        })
+                      }
+                    >
                       Play
                     </button>
-                    <button className="btn small" disabled={busy} onClick={() => postAction("select", { branchpoint: selectedBranchpoint || "", world: world.id, merge: false })}>
+                    <button
+                      className="btn small"
+                      disabled={busy}
+                      onClick={() =>
+                        postAction("select", {
+                          branchpoint: selectedBranchpoint || "",
+                          world: world.id,
+                          merge: false,
+                        })
+                      }
+                    >
                       Select
                     </button>
-                    <button className="btn small accent" disabled={busy} onClick={() => forkFromWorld(world)}>
+                    <button
+                      className="btn small accent"
+                      disabled={busy}
+                      onClick={() => forkFromWorld(world)}
+                    >
                       Fork
                     </button>
                   </div>
                   <div className="button-row">
-                    <button className="link-btn" onClick={() => openLog("codex", world.id)}>
+                    <button
+                      className="link-btn"
+                      onClick={() => openLog("codex", world.id)}
+                    >
                       Codex log
                     </button>
-                    <button className="link-btn" onClick={() => openLog("run", world.id)}>
+                    <button
+                      className="link-btn"
+                      onClick={() => openLog("run", world.id)}
+                    >
                       Run log
                     </button>
-                    <button className="link-btn" onClick={() => openLog("render", world.id)}>
+                    <button
+                      className="link-btn"
+                      onClick={() => openLog("render", world.id)}
+                    >
                       Render log
                     </button>
                   </div>
@@ -2236,7 +2670,11 @@ function ParallelWorldsDashboardView() {
             )}
           </h2>
           <p className="subtle mono">{logState.path || ""}</p>
-          <pre>{logState.loading ? "Loading log..." : logState.text || "Select a log from a world block."}</pre>
+          <pre>
+            {logState.loading
+              ? "Loading log..."
+              : logState.text || "Select a log from a world block."}
+          </pre>
         </article>
       </section>
     </main>
@@ -2255,10 +2693,21 @@ export default function App() {
   return (
     <div className="app-root">
       <div className="view-switch">
-        <NavLink end to="/" className={({ isActive }) => `btn small ${isActive ? "active" : "ghost"}`}>
+        <NavLink
+          end
+          to="/"
+          className={({ isActive }) =>
+            `btn small ${isActive ? "active" : "ghost"}`
+          }
+        >
           Canvas
         </NavLink>
-        <NavLink to="/dashboard" className={({ isActive }) => `btn small ${isActive ? "active" : "ghost"}`}>
+        <NavLink
+          to="/dashboard"
+          className={({ isActive }) =>
+            `btn small ${isActive ? "active" : "ghost"}`
+          }
+        >
           Dashboard
         </NavLink>
       </div>
