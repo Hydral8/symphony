@@ -4,9 +4,35 @@ import selectors
 import subprocess
 import sys
 import time
-from typing import Any, Dict, List, Tuple
+from typing import Any, Dict, List, Set, Tuple
 
 from .common import die, git, now_utc
+from .render_helper import ensure_render_helper
+
+
+VISUAL_EXTENSIONS: Set[str] = {
+    ".png",
+    ".jpg",
+    ".jpeg",
+    ".gif",
+    ".webp",
+    ".bmp",
+    ".svg",
+    ".mp4",
+    ".webm",
+    ".mov",
+}
+
+SKIP_DIRS: Set[str] = {
+    ".git",
+    "node_modules",
+    "__pycache__",
+    ".venv",
+    "venv",
+}
+
+MAX_VISUAL_BYTES = 30 * 1024 * 1024
+MAX_VISUAL_ARTIFACTS = 8
 
 
 def load_agents_skills(repo: str) -> List[str]:
@@ -462,10 +488,54 @@ def run_world(world: Dict[str, Any], branchpoint: Dict[str, Any], runner_cmd: st
     return payload
 
 
+def discover_visual_artifacts(worktree_path: str) -> List[str]:
+    found: List[str] = []
+    for root, dirs, files in os.walk(worktree_path):
+        dirs[:] = [d for d in dirs if d not in SKIP_DIRS]
+        for name in files:
+            ext = os.path.splitext(name)[1].lower()
+            if ext not in VISUAL_EXTENSIONS:
+                continue
+            path = os.path.realpath(os.path.join(root, name))
+            try:
+                size = os.path.getsize(path)
+            except OSError:
+                continue
+            if size > MAX_VISUAL_BYTES:
+                continue
+            found.append(path)
+    return found
+
+
+def select_visual_artifacts(before: Set[str], after: List[str]) -> List[str]:
+    if not after:
+        return []
+
+    new_paths = [path for path in after if path not in before]
+    candidates = new_paths if new_paths else after
+    candidates = sorted(
+        candidates,
+        key=lambda path: os.path.getmtime(path) if os.path.exists(path) else 0.0,
+        reverse=True,
+    )
+    unique: List[str] = []
+    seen: Set[str] = set()
+    for path in candidates:
+        if path in seen:
+            continue
+        seen.add(path)
+        unique.append(path)
+        if len(unique) >= MAX_VISUAL_ARTIFACTS:
+            break
+    return unique
+
+
 def run_render_world(world: Dict[str, Any], branchpoint: Dict[str, Any], render_cmd: str, timeout_sec: int) -> Dict[str, Any]:
     ensure_world_exists(world["worktree"])
     world_meta_dir = os.path.join(world["worktree"], ".parallel_worlds")
     os.makedirs(world_meta_dir, exist_ok=True)
+    ensure_render_helper(world_meta_dir)
+    before_artifacts = set(discover_visual_artifacts(world["worktree"]))
 
     payload: Dict[str, Any] = {
         "branchpoint_id": branchpoint["id"],
@@ -478,6 +548,7 @@ def run_render_world(world: Dict[str, Any], branchpoint: Dict[str, Any], render_
         "exit_code": None,
         "duration_sec": None,
         "render_log": None,
+        "visual_artifacts": [],
         "error": None,
         "finished_at": None,
     }
@@ -498,6 +569,8 @@ def run_render_world(world: Dict[str, Any], branchpoint: Dict[str, Any], render_
     payload["duration_sec"] = cmd_result["duration_sec"]
     payload["render_log"] = cmd_result["log_file"]
     payload["error"] = cmd_result["error"]
+    after_artifacts = discover_visual_artifacts(world["worktree"])
+    payload["visual_artifacts"] = select_visual_artifacts(before_artifacts, after_artifacts)
 
     payload["finished_at"] = now_utc()
     return payload

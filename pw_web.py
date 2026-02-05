@@ -7,10 +7,14 @@ import json
 import mimetypes
 import os
 import re
+import shutil
+import shlex
+import socket
 import subprocess
 import sys
 import tempfile
 import threading
+import time
 import traceback
 import uuid
 from datetime import datetime
@@ -28,6 +32,9 @@ _ACTION_JOBS_LOCK = threading.RLock()
 _ACTION_JOBS: Dict[str, Dict[str, Any]] = {}
 _MAX_ACTION_JOBS = 100
 _MAX_ACTION_LOG_CHARS = 250_000
+_LAUNCH_LOCK = threading.RLock()
+_WORLD_LAUNCHES: Dict[str, Dict[str, Any]] = {}
+_LAUNCH_HOST = "127.0.0.1"
 
 
 def _now_utc() -> str:
@@ -477,46 +484,95 @@ def _live_branch_state(repo: str, world: Dict[str, Any], branchpoint: Dict[str, 
     source_head = None
     commit_nodes: List[Dict[str, str]] = []
     commit_nodes_truncated = False
+
+    # Prefer worktree-local git state (supports both worktree mode and branch/local repo mode).
+    git_scope = repo
+    branch_for_scope = branch
+    source_for_scope = source_ref
+    if worktree and os.path.isdir(worktree):
+        inside = git(["-C", worktree, "rev-parse", "--is-inside-work-tree"], check=False)
+        if inside.returncode == 0:
+            git_scope = worktree
+            local_branch = git(["-C", worktree, "branch", "--show-current"], check=False).stdout.strip()
+            if local_branch:
+                branch_for_scope = local_branch
+
+            if source_ref:
+                source_probe = git(["-C", worktree, "rev-parse", "--verify", "--quiet", source_ref], check=False)
+                if source_probe.returncode == 0:
+                    source_for_scope = source_ref
+                else:
+                    origin_probe = git(["-C", worktree, "rev-parse", "--verify", "--quiet", f"origin/{source_ref}"], check=False)
+                    if origin_probe.returncode == 0:
+                        source_for_scope = f"origin/{source_ref}"
+                    else:
+                        source_for_scope = ""
+
+    if git_scope == worktree:
+        exists = bool(branch_for_scope)
+
     if exists:
-        head_proc = git(["rev-parse", "--short", branch], cwd=repo, check=False)
+        if git_scope == worktree:
+            head_proc = git(["-C", worktree, "rev-parse", "--short", "HEAD"], check=False)
+        else:
+            head_proc = git(["rev-parse", "--short", branch_for_scope], cwd=repo, check=False)
         if head_proc.returncode == 0:
             head = (head_proc.stdout or "").strip() or None
-        if source_ref:
-            source_head_proc = git(["rev-parse", "--short", source_ref], cwd=repo, check=False)
+
+        if source_for_scope:
+            if git_scope == worktree:
+                source_head_proc = git(["-C", worktree, "rev-parse", "--short", source_for_scope], check=False)
+            else:
+                source_head_proc = git(["rev-parse", "--short", source_for_scope], cwd=repo, check=False)
             if source_head_proc.returncode == 0:
                 source_head = (source_head_proc.stdout or "").strip() or None
-            ahead_proc = git(["rev-list", "--count", f"{source_ref}..{branch}"], cwd=repo, check=False)
+
+            if git_scope == worktree:
+                ahead_proc = git(["-C", worktree, "rev-list", "--count", f"{source_for_scope}..HEAD"], check=False)
+            else:
+                ahead_proc = git(["rev-list", "--count", f"{source_for_scope}..{branch_for_scope}"], cwd=repo, check=False)
             if ahead_proc.returncode == 0:
                 raw = (ahead_proc.stdout or "").strip()
                 try:
                     ahead = int(raw)
                 except ValueError:
                     ahead = None
-            log_proc = git(
-                [
-                    "log",
-                    "--reverse",
-                    "--max-count",
-                    "12",
-                    "--pretty=format:%h%x1f%s",
-                    f"{source_ref}..{branch}",
-                ],
-                cwd=repo,
-                check=False,
-            )
+
+            if git_scope == worktree:
+                log_proc = git(
+                    ["-C", worktree, "log", "--reverse", "--max-count", "12", "--pretty=format:%h%x1f%s", f"{source_for_scope}..HEAD"],
+                    check=False,
+                )
+            else:
+                log_proc = git(
+                    [
+                        "log",
+                        "--reverse",
+                        "--max-count",
+                        "12",
+                        "--pretty=format:%h%x1f%s",
+                        f"{source_for_scope}..{branch_for_scope}",
+                    ],
+                    cwd=repo,
+                    check=False,
+                )
         else:
-            log_proc = git(
-                [
-                    "log",
-                    "--reverse",
-                    "--max-count",
-                    "12",
-                    "--pretty=format:%h%x1f%s",
-                    branch,
-                ],
-                cwd=repo,
-                check=False,
-            )
+            if git_scope == worktree:
+                log_proc = git(["-C", worktree, "log", "--reverse", "--max-count", "12", "--pretty=format:%h%x1f%s", "HEAD"], check=False)
+            else:
+                log_proc = git(
+                    [
+                        "log",
+                        "--reverse",
+                        "--max-count",
+                        "12",
+                        "--pretty=format:%h%x1f%s",
+                        branch_for_scope,
+                    ],
+                    cwd=repo,
+                    check=False,
+                )
+
         if log_proc.returncode == 0:
             for line in (log_proc.stdout or "").splitlines():
                 item = line.strip()
@@ -610,6 +666,46 @@ def _serialize_world_row(repo: str, branchpoint: Dict[str, Any], world_id: str) 
         "render": render_row,
         "live": _live_branch_state(repo, world, branchpoint),
     }
+
+
+def _dashboard_branchpoint_worlds(repo: str, branchpoints: List[Dict[str, Any]]) -> Dict[str, List[Dict[str, Any]]]:
+    out: Dict[str, List[Dict[str, Any]]] = {}
+    for branchpoint in branchpoints:
+        bp_id = str(branchpoint.get("id", "")).strip()
+        if not bp_id:
+            continue
+        world_ids = branchpoint.get("world_ids") or []
+        if not isinstance(world_ids, list):
+            continue
+
+        worlds: List[Dict[str, Any]] = []
+        for world_id in world_ids:
+            wid = str(world_id).strip()
+            if not wid:
+                continue
+            try:
+                world = pw.load_world(repo, wid)
+            except (SystemExit, Exception):  # pragma: no cover - tolerate stale metadata rows.
+                continue
+            worlds.append(
+                {
+                    "id": wid,
+                    "name": str(world.get("name", "")).strip() or "world",
+                    "index": world.get("index"),
+                    "branch": str(world.get("branch", "")).strip(),
+                    "status": str(world.get("status", "")).strip() or "ready",
+                }
+            )
+
+        worlds.sort(
+            key=lambda item: (
+                int(item.get("index", 0)) if isinstance(item.get("index"), int) else 10_000,
+                str(item.get("name", "")),
+            )
+        )
+        out[bp_id] = worlds
+
+    return out
 
 
 def _is_merged_into(repo: str, source_branch: str, target_branch: str) -> bool:
@@ -823,6 +919,7 @@ class ParallelWorldsHandler(BaseHTTPRequestHandler):
                     "config": self._cfg(),
                     "latest_branchpoint": self._latest_branchpoint(),
                     "branchpoints": items,
+                    "branchpoint_worlds": _dashboard_branchpoint_worlds(repo, items),
                     "selected_branchpoint": bp_id,
                     "branchpoint": None,
                     "world_rows": [],
