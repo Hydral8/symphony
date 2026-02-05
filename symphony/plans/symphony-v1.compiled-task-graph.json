@@ -1,0 +1,706 @@
+{
+  "schema_version": "1.0",
+  "graph_id": "2fbc6637-41fc-43f5-a3f6-df4d7c31f26c",
+  "compiler_version": "manual-bootstrap-0.1.0",
+  "compiled_at": "2026-02-05T13:20:00Z",
+  "source_plan": {
+    "project_id": "8f0ddfdf-ae54-4d01-9d39-3cc41df70872",
+    "plan_id": "66937f87-9bf3-4d40-a9d1-c46cc0e57643",
+    "plan_version": 3,
+    "plan_hash": "sha256:8f1ab0afacde6bb11fd86be8f0847f4eb8f8db18f57f2ac27890085b1704b2aa"
+  },
+  "orchestrator": {
+    "max_parallel_agents": 6,
+    "retry_limit": 2,
+    "target_branch": "main",
+    "merge_strategy": "squash",
+    "quality_gates": [
+      "unit-tests",
+      "lint",
+      "schema-validation"
+    ]
+  },
+  "tasks": [
+    {
+      "task_id": "task_frontend_canvas_v1",
+      "source_node_id": "node_module_canvas",
+      "title": "Build multi-layer planning canvas UI",
+      "objective": "Implement node and edge editing UX with layer and POV switching.",
+      "instructions": "Create or extend webapp UI for multi-layer canvas, drag-and-drop nodes, edge creation, and plan JSON export using the v1 canvas schema.",
+      "acceptance_criteria": [
+        "User can create, edit, move, and delete nodes.",
+        "User can connect/disconnect nodes with edge relation type.",
+        "Layer and POV filters update visible nodes/edges.",
+        "Exported JSON matches canvas-plan schema structure."
+      ],
+      "inputs": [
+        {
+          "kind": "file",
+          "value": "webapp/src/App.jsx",
+          "note": "Current dashboard code to extend."
+        },
+        {
+          "kind": "doc",
+          "value": "symphony/schemas/canvas-plan.schema.json",
+          "note": "Contract for plan payload."
+        }
+      ],
+      "outputs": [
+        "Canvas editor components",
+        "Plan JSON serialization flow"
+      ],
+      "labels": [
+        "frontend",
+        "canvas",
+        "ux"
+      ],
+      "priority": 5,
+      "size": "L",
+      "parallelizable": true,
+      "capabilities": [
+        "frontend",
+        "testing"
+      ],
+      "human_checkpoints": [
+        "Review interaction model before merge."
+      ],
+      "execution": {
+        "agent": {
+          "type": "codex",
+          "model": "gpt-5-codex",
+          "temperature": 0.2
+        },
+        "workspace": {
+          "base_ref": "main",
+          "branch": "world/symphony/task_frontend_canvas_v1",
+          "worktree_hint": "/tmp/symphony/task_frontend_canvas_v1"
+        },
+        "budget": {
+          "max_attempts": 3,
+          "timeout_sec": 2400,
+          "max_input_tokens": 20000,
+          "max_output_tokens": 5000
+        },
+        "check_commands": [
+          "npm --prefix webapp run build"
+        ]
+      },
+      "status": "pending"
+    },
+    {
+      "task_id": "task_backend_plan_api_v1",
+      "source_node_id": "node_api_plan",
+      "title": "Implement plan CRUD API",
+      "objective": "Add project and plan endpoints to create, version, and fetch canvas plans.",
+      "instructions": "Implement API endpoints and storage wiring for projects and plans; ensure saved plans are versioned and retrievable.",
+      "acceptance_criteria": [
+        "POST /api/v1/projects creates project records.",
+        "POST /api/v1/projects/{project_id}/plans creates new plan versions.",
+        "GET /api/v1/projects/{project_id} returns latest plan metadata."
+      ],
+      "inputs": [
+        {
+          "kind": "doc",
+          "value": "SYMPHONY_ONE_PAGE_SPEC.md",
+          "note": "API contract section."
+        },
+        {
+          "kind": "file",
+          "value": "pw_web.py",
+          "note": "Existing local API backend baseline."
+        }
+      ],
+      "outputs": [
+        "Plan CRUD endpoints",
+        "Plan versioning persistence"
+      ],
+      "labels": [
+        "backend",
+        "api",
+        "planning"
+      ],
+      "priority": 5,
+      "size": "M",
+      "parallelizable": true,
+      "capabilities": [
+        "backend",
+        "testing"
+      ],
+      "execution": {
+        "agent": {
+          "type": "codex",
+          "model": "gpt-5-codex",
+          "temperature": 0.1
+        },
+        "workspace": {
+          "base_ref": "main",
+          "branch": "world/symphony/task_backend_plan_api_v1",
+          "worktree_hint": "/tmp/symphony/task_backend_plan_api_v1"
+        },
+        "budget": {
+          "max_attempts": 3,
+          "timeout_sec": 2000,
+          "max_input_tokens": 18000,
+          "max_output_tokens": 4500
+        },
+        "check_commands": [
+          "python3 -m pytest -q"
+        ]
+      },
+      "status": "pending"
+    },
+    {
+      "task_id": "task_backend_compile_service_v1",
+      "source_node_id": "node_api_compile",
+      "title": "Implement plan compiler service",
+      "objective": "Compile validated canvas plans into deterministic task DAG outputs.",
+      "instructions": "Use schema contracts under symphony/schemas and mapping rules in schema README to generate compiled task graphs.",
+      "acceptance_criteria": [
+        "POST /api/v1/plans/{plan_id}/compile returns compiled graph JSON.",
+        "Compiler maps eligible nodes to tasks and resolves dependencies.",
+        "Compiler output validates against compiled-task-graph schema."
+      ],
+      "inputs": [
+        {
+          "kind": "doc",
+          "value": "symphony/schemas/README.md",
+          "note": "Deterministic mapping rules."
+        },
+        {
+          "kind": "doc",
+          "value": "symphony/schemas/compiled-task-graph.schema.json",
+          "note": "Output contract."
+        }
+      ],
+      "outputs": [
+        "Compile service and endpoint",
+        "Task graph validation hooks"
+      ],
+      "labels": [
+        "backend",
+        "compiler"
+      ],
+      "priority": 5,
+      "size": "M",
+      "parallelizable": false,
+      "capabilities": [
+        "backend",
+        "testing"
+      ],
+      "execution": {
+        "agent": {
+          "type": "codex",
+          "model": "gpt-5-codex",
+          "temperature": 0.1
+        },
+        "workspace": {
+          "base_ref": "main",
+          "branch": "world/symphony/task_backend_compile_service_v1",
+          "worktree_hint": "/tmp/symphony/task_backend_compile_service_v1"
+        },
+        "budget": {
+          "max_attempts": 3,
+          "timeout_sec": 1800,
+          "max_input_tokens": 16000,
+          "max_output_tokens": 3500
+        },
+        "check_commands": [
+          "python3 -m pytest -q"
+        ]
+      },
+      "status": "pending"
+    },
+    {
+      "task_id": "task_orchestrator_scheduler_v1",
+      "source_node_id": "node_module_orchestrator",
+      "title": "Build orchestrator scheduler engine",
+      "objective": "Execute compiled DAG with dependency-aware parallel dispatch and retries.",
+      "instructions": "Implement task queue logic, runnable task selection, retry behavior, and run status accounting.",
+      "acceptance_criteria": [
+        "Only tasks with satisfied hard dependencies are runnable.",
+        "Scheduler respects max_parallel_agents.",
+        "Failed tasks retry up to retry_limit and then fail terminally."
+      ],
+      "inputs": [
+        {
+          "kind": "artifact",
+          "value": "task_backend_compile_service_v1",
+          "note": "Consumes compiled graph output."
+        },
+        {
+          "kind": "file",
+          "value": "parallel_worlds/commands.py",
+          "note": "Parallel execution patterns to reuse."
+        }
+      ],
+      "outputs": [
+        "DAG scheduler module",
+        "Run lifecycle state transitions"
+      ],
+      "labels": [
+        "backend",
+        "orchestrator",
+        "scheduler"
+      ],
+      "priority": 5,
+      "size": "L",
+      "parallelizable": false,
+      "capabilities": [
+        "backend",
+        "infra",
+        "testing"
+      ],
+      "execution": {
+        "agent": {
+          "type": "codex",
+          "model": "gpt-5-codex",
+          "temperature": 0.1
+        },
+        "workspace": {
+          "base_ref": "main",
+          "branch": "world/symphony/task_orchestrator_scheduler_v1",
+          "worktree_hint": "/tmp/symphony/task_orchestrator_scheduler_v1"
+        },
+        "budget": {
+          "max_attempts": 4,
+          "timeout_sec": 2600,
+          "max_input_tokens": 20000,
+          "max_output_tokens": 5000
+        },
+        "check_commands": [
+          "python3 -m pytest -q"
+        ]
+      },
+      "status": "pending"
+    },
+    {
+      "task_id": "task_orchestrator_agent_runtime_v1",
+      "source_node_id": "node_module_orchestrator",
+      "title": "Build Codex agent runtime adapter",
+      "objective": "Run Codex tasks with task-specific prompt/context snapshots in isolated workspaces.",
+      "instructions": "Implement a runtime adapter that builds prompts from task context, executes Codex command, captures logs, and persists artifacts.",
+      "acceptance_criteria": [
+        "Task prompt includes objective, acceptance criteria, and steering comments.",
+        "Each run stores prompt snapshot, command, logs, duration, and exit code.",
+        "Runtime supports pause/stop cancellation."
+      ],
+      "inputs": [
+        {
+          "kind": "file",
+          "value": "parallel_worlds/execution.py",
+          "note": "Existing codex execution helpers."
+        },
+        {
+          "kind": "artifact",
+          "value": "task_orchestrator_scheduler_v1",
+          "note": "Scheduler dispatch interface."
+        }
+      ],
+      "outputs": [
+        "Codex runtime adapter",
+        "Agent run persistence and artifacts"
+      ],
+      "labels": [
+        "backend",
+        "agent-runtime"
+      ],
+      "priority": 5,
+      "size": "L",
+      "parallelizable": false,
+      "capabilities": [
+        "backend",
+        "infra",
+        "testing"
+      ],
+      "execution": {
+        "agent": {
+          "type": "codex",
+          "model": "gpt-5-codex",
+          "temperature": 0.1
+        },
+        "workspace": {
+          "base_ref": "main",
+          "branch": "world/symphony/task_orchestrator_agent_runtime_v1",
+          "worktree_hint": "/tmp/symphony/task_orchestrator_agent_runtime_v1"
+        },
+        "budget": {
+          "max_attempts": 4,
+          "timeout_sec": 2600,
+          "max_input_tokens": 22000,
+          "max_output_tokens": 5500
+        },
+        "check_commands": [
+          "python3 -m pytest -q"
+        ]
+      },
+      "status": "pending"
+    },
+    {
+      "task_id": "task_backend_control_api_v1",
+      "source_node_id": "node_api_control",
+      "title": "Implement task control and steering APIs",
+      "objective": "Add pause/resume/stop and steer endpoints for active tasks and agent runs.",
+      "instructions": "Wire control endpoints to orchestrator runtime and persist steering comments with versioned context updates.",
+      "acceptance_criteria": [
+        "POST /tasks/{task_id}/pause, resume, stop controls running tasks.",
+        "POST /tasks/{task_id}/steer appends steering comments to task context.",
+        "New steering is visible in subsequent agent attempts."
+      ],
+      "inputs": [
+        {
+          "kind": "doc",
+          "value": "SYMPHONY_ONE_PAGE_SPEC.md",
+          "note": "Orchestration API contract."
+        },
+        {
+          "kind": "artifact",
+          "value": "task_orchestrator_agent_runtime_v1",
+          "note": "Task lifecycle integration points."
+        }
+      ],
+      "outputs": [
+        "Control API endpoints",
+        "Steering comment persistence"
+      ],
+      "labels": [
+        "backend",
+        "api",
+        "control-plane"
+      ],
+      "priority": 4,
+      "size": "M",
+      "parallelizable": false,
+      "capabilities": [
+        "backend",
+        "testing"
+      ],
+      "execution": {
+        "agent": {
+          "type": "codex",
+          "model": "gpt-5-codex"
+        },
+        "workspace": {
+          "base_ref": "main",
+          "branch": "world/symphony/task_backend_control_api_v1",
+          "worktree_hint": "/tmp/symphony/task_backend_control_api_v1"
+        },
+        "budget": {
+          "max_attempts": 3,
+          "timeout_sec": 1800,
+          "max_input_tokens": 16000,
+          "max_output_tokens": 3500
+        },
+        "check_commands": [
+          "python3 -m pytest -q"
+        ]
+      },
+      "status": "pending"
+    },
+    {
+      "task_id": "task_backend_progress_events_v1",
+      "source_node_id": "node_api_progress",
+      "title": "Implement progress and event streaming APIs",
+      "objective": "Expose run-level progress, DAG states, and live event streams for UI.",
+      "instructions": "Implement GET /runs/{run_id}, GET /runs/{run_id}/diagram, and event stream endpoint using SSE.",
+      "acceptance_criteria": [
+        "Progress APIs return counts and state transitions.",
+        "Diagram endpoint returns task nodes and dependency edges with statuses.",
+        "Events endpoint streams task and agent events in order."
+      ],
+      "inputs": [
+        {
+          "kind": "artifact",
+          "value": "task_orchestrator_scheduler_v1",
+          "note": "Run/task state source."
+        },
+        {
+          "kind": "artifact",
+          "value": "task_orchestrator_agent_runtime_v1",
+          "note": "Agent event source."
+        }
+      ],
+      "outputs": [
+        "Progress API endpoints",
+        "SSE event streamer"
+      ],
+      "labels": [
+        "backend",
+        "observability",
+        "events"
+      ],
+      "priority": 4,
+      "size": "M",
+      "parallelizable": false,
+      "capabilities": [
+        "backend",
+        "testing"
+      ],
+      "execution": {
+        "agent": {
+          "type": "codex",
+          "model": "gpt-5-codex"
+        },
+        "workspace": {
+          "base_ref": "main",
+          "branch": "world/symphony/task_backend_progress_events_v1",
+          "worktree_hint": "/tmp/symphony/task_backend_progress_events_v1"
+        },
+        "budget": {
+          "max_attempts": 3,
+          "timeout_sec": 1800,
+          "max_input_tokens": 16000,
+          "max_output_tokens": 3500
+        },
+        "check_commands": [
+          "python3 -m pytest -q"
+        ]
+      },
+      "status": "pending"
+    },
+    {
+      "task_id": "task_frontend_progress_view_v1",
+      "source_node_id": "node_screen_progress",
+      "title": "Build progress diagram and control panel UI",
+      "objective": "Render run DAG, per-task status, agent counters, and task controls.",
+      "instructions": "Implement diagram view and task detail panel with control actions and logs/artifacts tabs.",
+      "acceptance_criteria": [
+        "DAG view displays pending/running/blocked/done/failed/paused states.",
+        "UI shows active agent count and completion percentage.",
+        "Operators can pause/resume/stop tasks and add steering comments."
+      ],
+      "inputs": [
+        {
+          "kind": "artifact",
+          "value": "task_backend_progress_events_v1",
+          "note": "Consumes progress APIs and event stream."
+        },
+        {
+          "kind": "artifact",
+          "value": "task_backend_control_api_v1",
+          "note": "Control actions."
+        },
+        {
+          "kind": "file",
+          "value": "webapp/src/App.jsx",
+          "note": "Dashboard baseline."
+        }
+      ],
+      "outputs": [
+        "Progress diagram UI",
+        "Task controls and logs panel"
+      ],
+      "labels": [
+        "frontend",
+        "progress",
+        "control-plane"
+      ],
+      "priority": 4,
+      "size": "L",
+      "parallelizable": false,
+      "capabilities": [
+        "frontend",
+        "backend",
+        "testing"
+      ],
+      "execution": {
+        "agent": {
+          "type": "codex",
+          "model": "gpt-5-codex",
+          "temperature": 0.2
+        },
+        "workspace": {
+          "base_ref": "main",
+          "branch": "world/symphony/task_frontend_progress_view_v1",
+          "worktree_hint": "/tmp/symphony/task_frontend_progress_view_v1"
+        },
+        "budget": {
+          "max_attempts": 3,
+          "timeout_sec": 2200,
+          "max_input_tokens": 20000,
+          "max_output_tokens": 5000
+        },
+        "check_commands": [
+          "npm --prefix webapp run build"
+        ]
+      },
+      "status": "pending"
+    },
+    {
+      "task_id": "task_integration_e2e_v1",
+      "source_node_id": "node_workflow_e2e",
+      "title": "Integrate end-to-end workflow and smoke tests",
+      "objective": "Validate full flow from plan creation to compiled graph, orchestration, and progress display.",
+      "instructions": "Add integration tests and a smoke script covering project/plan/compile/run/progress/control flow.",
+      "acceptance_criteria": [
+        "E2E happy path passes with one sample plan.",
+        "Failure and retry flow is covered in tests.",
+        "Pause/resume/steer actions are test-validated."
+      ],
+      "inputs": [
+        {
+          "kind": "artifact",
+          "value": "task_frontend_canvas_v1"
+        },
+        {
+          "kind": "artifact",
+          "value": "task_backend_compile_service_v1"
+        },
+        {
+          "kind": "artifact",
+          "value": "task_orchestrator_scheduler_v1"
+        },
+        {
+          "kind": "artifact",
+          "value": "task_frontend_progress_view_v1"
+        }
+      ],
+      "outputs": [
+        "End-to-end smoke coverage",
+        "Integration test suite"
+      ],
+      "labels": [
+        "testing",
+        "integration"
+      ],
+      "priority": 3,
+      "size": "M",
+      "parallelizable": false,
+      "capabilities": [
+        "testing",
+        "backend",
+        "frontend"
+      ],
+      "execution": {
+        "agent": {
+          "type": "codex",
+          "model": "gpt-5-codex"
+        },
+        "workspace": {
+          "base_ref": "main",
+          "branch": "world/symphony/task_integration_e2e_v1",
+          "worktree_hint": "/tmp/symphony/task_integration_e2e_v1"
+        },
+        "budget": {
+          "max_attempts": 3,
+          "timeout_sec": 2400,
+          "max_input_tokens": 18000,
+          "max_output_tokens": 4500
+        },
+        "check_commands": [
+          "python3 -m pytest -q",
+          "npm --prefix webapp run build"
+        ]
+      },
+      "status": "pending"
+    }
+  ],
+  "dependencies": [
+    {
+      "from_task_id": "task_backend_plan_api_v1",
+      "to_task_id": "task_backend_compile_service_v1",
+      "type": "hard_block",
+      "reason": "Compiler consumes plan versions."
+    },
+    {
+      "from_task_id": "task_backend_compile_service_v1",
+      "to_task_id": "task_orchestrator_scheduler_v1",
+      "type": "hard_block",
+      "reason": "Scheduler requires compiled DAG input."
+    },
+    {
+      "from_task_id": "task_orchestrator_scheduler_v1",
+      "to_task_id": "task_orchestrator_agent_runtime_v1",
+      "type": "hard_block",
+      "reason": "Runtime is managed by scheduler."
+    },
+    {
+      "from_task_id": "task_orchestrator_agent_runtime_v1",
+      "to_task_id": "task_backend_control_api_v1",
+      "type": "hard_block",
+      "reason": "Control API needs runtime hooks."
+    },
+    {
+      "from_task_id": "task_orchestrator_agent_runtime_v1",
+      "to_task_id": "task_backend_progress_events_v1",
+      "type": "hard_block",
+      "reason": "Events depend on runtime signals."
+    },
+    {
+      "from_task_id": "task_backend_progress_events_v1",
+      "to_task_id": "task_frontend_progress_view_v1",
+      "type": "hard_block",
+      "reason": "Progress UI needs diagram/events endpoints."
+    },
+    {
+      "from_task_id": "task_backend_control_api_v1",
+      "to_task_id": "task_frontend_progress_view_v1",
+      "type": "hard_block",
+      "reason": "Progress UI control panel uses control APIs."
+    },
+    {
+      "from_task_id": "task_frontend_canvas_v1",
+      "to_task_id": "task_integration_e2e_v1",
+      "type": "hard_block",
+      "reason": "E2E includes plan authoring."
+    },
+    {
+      "from_task_id": "task_frontend_progress_view_v1",
+      "to_task_id": "task_integration_e2e_v1",
+      "type": "hard_block",
+      "reason": "E2E includes progress operations."
+    }
+  ],
+  "stages": [
+    {
+      "stage_id": "stage_parallel_foundation",
+      "name": "Parallel Foundation",
+      "task_ids": [
+        "task_frontend_canvas_v1",
+        "task_backend_plan_api_v1"
+      ],
+      "unlock_condition": "all_done"
+    },
+    {
+      "stage_id": "stage_compiler",
+      "name": "Plan Compiler",
+      "task_ids": [
+        "task_backend_compile_service_v1"
+      ],
+      "unlock_condition": "all_done"
+    },
+    {
+      "stage_id": "stage_orchestrator_core",
+      "name": "Orchestrator Core",
+      "task_ids": [
+        "task_orchestrator_scheduler_v1",
+        "task_orchestrator_agent_runtime_v1"
+      ],
+      "unlock_condition": "all_done"
+    },
+    {
+      "stage_id": "stage_runtime_interfaces",
+      "name": "Runtime Interfaces",
+      "task_ids": [
+        "task_backend_control_api_v1",
+        "task_backend_progress_events_v1"
+      ],
+      "unlock_condition": "all_done"
+    },
+    {
+      "stage_id": "stage_frontend_progress",
+      "name": "Progress UI",
+      "task_ids": [
+        "task_frontend_progress_view_v1"
+      ],
+      "unlock_condition": "all_done"
+    },
+    {
+      "stage_id": "stage_integration",
+      "name": "Integration",
+      "task_ids": [
+        "task_integration_e2e_v1"
+      ],
+      "unlock_condition": "all_done"
+    }
+  ]
+}
