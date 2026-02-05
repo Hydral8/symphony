@@ -1,4 +1,5 @@
 import os
+import shutil
 from typing import Any, Dict, List, Optional
 
 from .common import branch_exists, commit_exists, current_branch, die, git, is_subpath
@@ -37,18 +38,65 @@ def resolve_start_ref(repo: str, base_branch: str, from_ref: Optional[str]) -> s
     return ""
 
 
+def _remove_worktree_path(repo: str, worktree_path: str) -> None:
+    git(["worktree", "remove", "--force", worktree_path], cwd=repo, check=False)
+    if os.path.exists(worktree_path):
+        shutil.rmtree(worktree_path, ignore_errors=True)
+
+
+def _ensure_existing_worktree_matches(repo: str, worktree_path: str, branch: str, start_ref: str) -> bool:
+    probe = git(["-C", worktree_path, "rev-parse", "--is-inside-work-tree"], check=False)
+    if probe.returncode != 0:
+        _remove_worktree_path(repo, worktree_path)
+        return False
+
+    current = git(["-C", worktree_path, "branch", "--show-current"], check=False).stdout.strip()
+    if current == branch:
+        return True
+
+    status = git(["-C", worktree_path, "status", "--porcelain"], check=False)
+    if status.returncode == 0 and not (status.stdout or "").strip():
+        if branch_exists(branch, repo):
+            checkout = git(["-C", worktree_path, "checkout", branch], check=False)
+        else:
+            checkout = git(["-C", worktree_path, "checkout", "-b", branch, start_ref], check=False)
+        if checkout.returncode == 0:
+            return True
+
+    _remove_worktree_path(repo, worktree_path)
+    return False
+
+
+def _add_new_worktree(repo: str, branch: str, start_ref: str, worktree_path: str) -> None:
+    def _args() -> List[str]:
+        if branch_exists(branch, repo):
+            return ["worktree", "add", worktree_path, branch]
+        return ["worktree", "add", "-b", branch, worktree_path, start_ref]
+
+    first_args = _args()
+    first = git(first_args, cwd=repo, check=False)
+    if first.returncode == 0:
+        return
+
+    # Recover from stale worktree metadata and retry once.
+    git(["worktree", "prune"], cwd=repo, check=False)
+    second_args = _args()
+    second = git(second_args, cwd=repo, check=False)
+    if second.returncode != 0:
+        message = (second.stderr or first.stderr or second.stdout or first.stdout or "").strip()
+        die(f"failed to add worktree {worktree_path}: {message}")
+
+
 def add_worktree(branch: str, start_ref: str, worktree_path: str, repo: str) -> None:
     if os.path.exists(worktree_path):
         if os.path.exists(os.path.join(worktree_path, ".git")):
-            return
-        die(f"worktree path already exists and is not a git worktree: {worktree_path}")
+            if _ensure_existing_worktree_matches(repo, worktree_path, branch, start_ref):
+                return
+        else:
+            die(f"worktree path already exists and is not a git worktree: {worktree_path}")
 
     os.makedirs(os.path.dirname(worktree_path), exist_ok=True)
-
-    if branch_exists(branch, repo):
-        git(["worktree", "add", worktree_path, branch], cwd=repo, check=True)
-    else:
-        git(["worktree", "add", "-b", branch, worktree_path, start_ref], cwd=repo, check=True)
+    _add_new_worktree(repo, branch, start_ref, worktree_path)
 
 
 def write_world_notes(world_meta_dir: str, world: Dict[str, Any], branchpoint: Dict[str, Any]) -> None:
