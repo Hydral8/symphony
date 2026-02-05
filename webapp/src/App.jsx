@@ -980,7 +980,7 @@ function CanvasPlannerView() {
       <nav className="glass-panel toolbar-dock animate-slide-up">
         <div className="toolbar-group">
           <span className="eyebrow" style={{ margin: 0 }}>
-            Symphony
+            Canvas
           </span>
         </div>
 
@@ -1142,7 +1142,7 @@ function CanvasPlannerView() {
       {/* Floating Right Dock (Inspector) */}
       <aside
         className="glass-panel layer-dock animate-fade-in"
-        style={{ left: "auto", right: 24, top: 100 }}
+        style={{ left: "auto", right: 24, top: "calc(var(--header-height) + 60px)" }}
       >
         {selectedNode ? (
           <div className="flex-col" style={{ gap: 12 }}>
@@ -2692,25 +2692,34 @@ export default function App() {
 
   return (
     <div className="app-root">
-      <div className="view-switch">
-        <NavLink
-          end
-          to="/"
-          className={({ isActive }) =>
-            `btn small ${isActive ? "active" : "ghost"}`
-          }
-        >
-          Canvas
-        </NavLink>
-        <NavLink
-          to="/dashboard"
-          className={({ isActive }) =>
-            `btn small ${isActive ? "active" : "ghost"}`
-          }
-        >
-          Dashboard
-        </NavLink>
-      </div>
+      <header className="app-nav glass-panel">
+        <div className="nav-brand">
+          <div className="brand-mark">S</div>
+          <div>
+            <div className="brand-name">Symphony</div>
+            <div className="brand-sub">AI Planning Studio</div>
+          </div>
+        </div>
+        <nav className="nav-links">
+          <NavLink
+            end
+            to="/"
+            className={({ isActive }) =>
+              `nav-link ${isActive ? "active" : ""}`
+            }
+          >
+            Canvas
+          </NavLink>
+          <NavLink
+            to="/dashboard"
+            className={({ isActive }) =>
+              `nav-link ${isActive ? "active" : ""}`
+            }
+          >
+            Dashboard
+          </NavLink>
+        </nav>
+      </header>
       <Routes>
         <Route path="/" element={<CanvasPlannerView />} />
         <Route path="/canvas" element={<Navigate to="/" replace />} />

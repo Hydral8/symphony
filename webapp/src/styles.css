@@ -60,6 +60,100 @@ body {
   overflow: hidden; /* App handles scrolling */
 }
 
+.app-nav {
+  position: fixed;
+  top: 16px;
+  left: 50%;
+  transform: translateX(-50%);
+  width: min(1180px, 92vw);
+  height: var(--header-height);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0 18px;
+  z-index: 120;
+}
+
+.nav-brand {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.brand-mark {
+  width: 36px;
+  height: 36px;
+  border-radius: 12px;
+  display: grid;
+  place-items: center;
+  background: linear-gradient(135deg, var(--teal-dim), var(--amber-dim));
+  color: #fff;
+  font-weight: 700;
+  font-size: 1rem;
+  box-shadow: 0 6px 16px rgba(20, 184, 166, 0.25);
+}
+
+.brand-name {
+  font-weight: 700;
+  font-size: 1rem;
+  letter-spacing: 0.02em;
+}
+
+.brand-sub {
+  font-size: 0.75rem;
+  color: var(--ink-muted);
+}
+
+.nav-links {
+  display: flex;
+  gap: 12px;
+}
+
+.nav-link {
+  text-decoration: none;
+  color: var(--ink-soft);
+  padding: 8px 14px;
+  border-radius: 999px;
+  border: 1px solid transparent;
+  transition: all 0.2s ease;
+}
+
+.nav-link:hover {
+  color: var(--ink);
+  border-color: rgba(255, 255, 255, 0.1);
+  background: rgba(255, 255, 255, 0.06);
+}
+
+.nav-link.active {
+  color: #fff;
+  background: rgba(20, 184, 166, 0.2);
+  border-color: rgba(20, 184, 166, 0.5);
+}
+
+@media (max-width: 720px) {
+  .app-nav {
+    height: auto;
+    padding: 12px 14px;
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 8px;
+  }
+
+  .nav-links {
+    width: 100%;
+    justify-content: flex-start;
+    flex-wrap: wrap;
+  }
+
+  .toolbar-dock {
+    top: calc(var(--header-height) + 80px);
+  }
+
+  .layer-dock {
+    top: calc(var(--header-height) + 120px);
+  }
+}
+
 /* Custom Scrollbar */
 ::-webkit-scrollbar {
   width: 8px;
@@ -235,7 +329,7 @@ textarea:focus {
 /* Floating Toolbar */
 .toolbar-dock {
   position: absolute;
-  top: 24px;
+  top: calc(var(--header-height) + 32px);
   left: 50%;
   transform: translateX(-50%);
   z-index: 100;
@@ -259,7 +353,7 @@ textarea:focus {
 /* Floating Layer Panel */
 .layer-dock {
   position: absolute;
-  top: 100px;
+  top: calc(var(--header-height) + 70px);
   left: 24px;
   width: 280px;
   z-index: 90;
