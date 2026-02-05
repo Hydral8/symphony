@@ -1,0 +1,42 @@
+{
+  "base_branch": "main",
+  "branch_prefix": "world",
+  "worlds_dir": "/tmp/parallel_worlds_worlds",
+  "default_world_count": 3,
+  "runner": {
+    "command": "",
+    "timeout_sec": 300
+  },
+  "codex": {
+    "enabled": false,
+    "command": "",
+    "timeout_sec": 900,
+    "use_agents_md_skills": true,
+    "automation": {
+      "enabled": false,
+      "name_prefix": "Parallel Worlds"
+    }
+  },
+  "render": {
+    "command": "",
+    "timeout_sec": 180,
+    "preview_lines": 25
+  },
+  "execution": {
+    "max_parallel_worlds": 3
+  },
+  "strategies": [
+    {
+      "name": "minimal-fix",
+      "notes": "Smallest targeted change with low risk."
+    },
+    {
+      "name": "robust-fix",
+      "notes": "Root-cause oriented implementation with guardrails."
+    },
+    {
+      "name": "refactor-path",
+      "notes": "Refactor to improve maintainability while solving intent."
+    }
+  ]
+}

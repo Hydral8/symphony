@@ -1,0 +1,13 @@
+# Python
+__pycache__/
+*.pyc
+.pycache_local/
+
+# Reports and traces
+report.md
+play.md
+.parallel_worlds/
+
+# Local worlds directory if created inside repo (not recommended)
+.worlds/
+worlds/
