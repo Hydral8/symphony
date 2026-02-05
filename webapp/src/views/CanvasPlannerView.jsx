@@ -331,6 +331,12 @@ export default function CanvasPlannerView() {
     setSelectedEdgeKey(null);
   }
 
+  function handleCanvasClick(event) {
+    if (event.target.closest(".canvas-node")) return;
+    setSelectedNodeId(null);
+    setSelectedEdgeKey(null);
+  }
+
   function handleWheel(event) {
     event.preventDefault();
     if (!viewportRef.current) return;
@@ -610,6 +616,7 @@ export default function CanvasPlannerView() {
         className="canvas-viewport"
         ref={viewportRef}
         onPointerDown={handleCanvasPointerDown}
+        onClick={handleCanvasClick}
         onWheel={handleWheel}
       >
         <div
