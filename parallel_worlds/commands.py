@@ -5,6 +5,8 @@ from typing import Any, Dict, List, Optional, Tuple
 from .common import die, ensure_git_repo, git, now_utc, read_json, relative_to_repo, slugify, worktree_is_clean, write_json
 from .config import load_config, write_default_config
 from .execution import load_agents_skills, run_codex_world, run_render_world, run_world, tail_file
+from .render_helper import DEFAULT_RENDER_COMMAND
+from .runner_helper import DEFAULT_RUNNER_COMMAND
 from .state import (
     codex_run_file,
     ensure_metadata_dirs,
@@ -30,8 +32,7 @@ from .strategy import choose_strategies, make_branchpoint_id
 from .worlds import add_worktree, ensure_base_branch, ensure_worlds_dir, matches_world_filter, resolve_start_ref, write_world_notes
 
 
-def _autocommit_world_changes(world: Dict[str, Any], branchpoint_id: str, prefix: str) -> Optional[str]:
-    worktree = world.get("worktree", "")
+def _collect_commit_candidate_paths(worktree: str) -> List[str]:
     status = git(["status", "--porcelain"], cwd=worktree, check=False)
     lines = (status.stdout or "").splitlines()
     paths: List[str] = []
@@ -51,12 +52,14 @@ def _autocommit_world_changes(world: Dict[str, Any], branchpoint_id: str, prefix
             continue
         paths.append(path)
 
-    unique_paths = sorted(set(paths))
-    if not unique_paths:
+    return sorted(set(paths))
+
+
+def _commit_paths(worktree: str, paths: List[str], message: str) -> Optional[str]:
+    if not paths:
         return None
 
-    git(["add", "-A", "--"] + unique_paths, cwd=worktree, check=True)
-    message = f"{prefix}: {branchpoint_id} {world.get('name', world.get('id', 'world'))}"
+    git(["add", "-A", "--"] + paths, cwd=worktree, check=True)
     commit = git(
         [
             "-c",
@@ -74,6 +77,89 @@ def _autocommit_world_changes(world: Dict[str, Any], branchpoint_id: str, prefix
         return None
     head = git(["rev-parse", "HEAD"], cwd=worktree, check=False)
     return (head.stdout or "").strip() or None
+
+
+def _split_commit_chunks(paths: List[str], target_count: int) -> List[List[str]]:
+    if not paths:
+        return []
+    chunk_count = min(max(1, int(target_count or 1)), len(paths))
+    base = len(paths) // chunk_count
+    extra = len(paths) % chunk_count
+    chunks: List[List[str]] = []
+    cursor = 0
+    for idx in range(chunk_count):
+        size = base + (1 if idx < extra else 0)
+        if size <= 0:
+            continue
+        chunk = paths[cursor : cursor + size]
+        if chunk:
+            chunks.append(chunk)
+        cursor += size
+    return chunks
+
+
+def _autocommit_world_changes_series(
+    world: Dict[str, Any],
+    branchpoint_id: str,
+    prefix: str,
+    target_count: int,
+) -> List[str]:
+    worktree = world.get("worktree", "")
+    if not worktree:
+        return []
+
+    unique_paths = _collect_commit_candidate_paths(worktree)
+    if not unique_paths:
+        return []
+
+    chunks = _split_commit_chunks(unique_paths, target_count)
+    total = len(chunks)
+    shas: List[str] = []
+    world_name = world.get("name", world.get("id", "world"))
+    for idx, chunk in enumerate(chunks, start=1):
+        suffix = f" [{idx}/{total}]" if total > 1 else ""
+        message = f"{prefix}: {branchpoint_id} {world_name}{suffix}"
+        sha = _commit_paths(worktree, chunk, message)
+        if not sha:
+            break
+        shas.append(sha)
+    return shas
+
+
+def _autocommit_world_changes(world: Dict[str, Any], branchpoint_id: str, prefix: str) -> Optional[str]:
+    shas = _autocommit_world_changes_series(world, branchpoint_id, prefix, target_count=1)
+    if not shas:
+        return None
+    return shas[-1]
+
+
+def _ensure_config_commands(cfg_path: str) -> None:
+    payload = read_json(cfg_path)
+    changed = False
+
+    runner = payload.get("runner")
+    if not isinstance(runner, dict):
+        runner = {}
+        payload["runner"] = runner
+        changed = True
+    runner_cmd = str(runner.get("command", "") or "").strip()
+    if not runner_cmd:
+        runner["command"] = DEFAULT_RUNNER_COMMAND
+        changed = True
+
+    render = payload.get("render")
+    if not isinstance(render, dict):
+        render = {}
+        payload["render"] = render
+        changed = True
+    render_cmd = str(render.get("command", "") or "").strip()
+    if not render_cmd:
+        render["command"] = DEFAULT_RENDER_COMMAND
+        changed = True
+
+    if changed:
+        write_json(cfg_path, payload)
+        print(f"updated config defaults: {cfg_path}")
 
 
 def create_project(
@@ -126,6 +212,7 @@ def create_project(
     if cfg_payload.get("base_branch") != base:
         cfg_payload["base_branch"] = base
         write_json(cfg_path, cfg_payload)
+    _ensure_config_commands(cfg_path)
 
     ensure_metadata_dirs(path)
 
@@ -152,6 +239,7 @@ def switch_project(project_path: str, config_name: str) -> Tuple[str, str]:
     cfg_path = os.path.join(repo, cfg_name)
     if not os.path.exists(cfg_path):
         write_default_config(cfg_path, force=False)
+    _ensure_config_commands(cfg_path)
 
     ensure_metadata_dirs(repo)
 
@@ -304,6 +392,9 @@ def _run_world_pipeline(
     codex_enabled: bool,
     codex_cfg: Dict[str, Any],
     available_skills: List[str],
+    commit_mode: str,
+    commit_prefix: str,
+    commit_target_count: int,
     runner_cmd: str,
     timeout_sec: int,
     skip_runner: bool,
@@ -317,6 +408,29 @@ def _run_world_pipeline(
                 codex_cfg=codex_cfg,
                 available_skills=available_skills,
             )
+            if commit_mode == "series" and codex_result:
+                commit_count = int(codex_result.get("commit_count") or 0)
+                needed = max(0, int(commit_target_count) - commit_count)
+                if needed > 0:
+                    print(
+                        f"codex {world['id']}: commit_count={commit_count}; "
+                        f"adding up to {needed} checkpoint commit(s) before runner"
+                    )
+                    shas = _autocommit_world_changes_series(
+                        world=world,
+                        branchpoint_id=str(branchpoint.get("id", "")),
+                        prefix=commit_prefix,
+                        target_count=needed,
+                    )
+                    if shas:
+                        codex_result["autocommit_shas"] = shas
+                        codex_result["autocommit_count"] = len(shas)
+                        codex_result["commit_count"] = commit_count + len(shas)
+                        codex_result["after_head"] = shas[-1]
+                        print(
+                            f"committed {world['id']}: +{len(shas)} checkpoint "
+                            f"commit(s), total={codex_result['commit_count']}"
+                        )
         run_result = run_world(
             world=world,
             branchpoint=branchpoint,
@@ -355,6 +469,7 @@ def _apply_run_result(
     run_result: Dict[str, Any],
     commit_mode: str,
     commit_prefix: str,
+    commit_target_count: int,
 ) -> None:
     if codex_result:
         save_codex_run(repo, bp_id, world["id"], codex_result)
@@ -384,14 +499,21 @@ def _apply_run_result(
         if codex_failed and run_result.get("exit_code") is None:
             world["status"] = "error"
         commit_count = int(codex_result.get("commit_count") or 0)
-        if commit_mode == "series" and commit_count <= 0:
-            print(
-                f"codex {world['id']}: no intermediate commits detected; applying fallback commit"
+        if commit_mode == "series":
+            needed = max(1, int(commit_target_count) - commit_count)
+            shas = _autocommit_world_changes_series(
+                world=world,
+                branchpoint_id=bp_id,
+                prefix=commit_prefix,
+                target_count=needed,
             )
-            commit_sha = _autocommit_world_changes(world, bp_id, commit_prefix)
-            if commit_sha:
-                world["last_commit"] = commit_sha
-                print(f"committed {world['id']}: {commit_sha}")
+            if shas:
+                world["last_commit"] = shas[-1]
+                codex_result["commit_count"] = commit_count + len(shas)
+                codex_result["post_run_autocommit_count"] = len(shas)
+                codex_result["post_run_autocommit_shas"] = shas
+                print(f"committed {world['id']}: +{len(shas)} post-run checkpoint commit(s)")
+                save_codex_run(repo, bp_id, world["id"], codex_result)
 
     save_world(repo, world)
     print(
@@ -419,6 +541,7 @@ def run_branchpoint(
     codex_cfg = cfg.get("codex", {})
     codex_enabled = bool(codex_cfg.get("enabled", False)) and not skip_codex
     commit_mode = str(codex_cfg.get("commit_mode", "series")).strip().lower() or "series"
+    commit_target_count = max(1, int(codex_cfg.get("commit_target_count", 3) or 3))
     commit_prefix = str(codex_cfg.get("commit_prefix", "pw-step")).strip() or "pw-step"
 
     selected_worlds = resolve_worlds_for_branchpoint(repo, branchpoint, world_filters)
@@ -438,6 +561,9 @@ def run_branchpoint(
                 codex_enabled=codex_enabled,
                 codex_cfg=codex_cfg,
                 available_skills=available_skills,
+                commit_mode=commit_mode,
+                commit_prefix=commit_prefix,
+                commit_target_count=commit_target_count,
                 runner_cmd=runner_cmd,
                 timeout_sec=timeout_sec,
                 skip_runner=skip_runner,
@@ -450,6 +576,7 @@ def run_branchpoint(
                 run_result,
                 commit_mode=commit_mode,
                 commit_prefix=commit_prefix,
+                commit_target_count=commit_target_count,
             )
     else:
         for world in selected_worlds:
@@ -465,6 +592,9 @@ def run_branchpoint(
                     codex_enabled,
                     codex_cfg,
                     available_skills,
+                    commit_mode,
+                    commit_prefix,
+                    commit_target_count,
                     runner_cmd,
                     timeout_sec,
                     skip_runner,
@@ -481,6 +611,7 @@ def run_branchpoint(
                     run_result,
                     commit_mode=commit_mode,
                     commit_prefix=commit_prefix,
+                    commit_target_count=commit_target_count,
                 )
 
     branchpoint["status"] = "ran"

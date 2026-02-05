@@ -109,6 +109,223 @@ def _get_action_job(job_id: str) -> Optional[Dict[str, Any]]:
         }
 
 
+def _launch_key(repo: str, branchpoint_id: str, world_id: str) -> str:
+    return f"{os.path.realpath(repo)}::{branchpoint_id}::{world_id}"
+
+
+def _is_process_alive(proc: Any) -> bool:
+    try:
+        return proc is not None and proc.poll() is None
+    except Exception:
+        return False
+
+
+def _is_port_open(host: str, port: int) -> bool:
+    try:
+        with socket.create_connection((host, int(port)), timeout=0.4):
+            return True
+    except OSError:
+        return False
+
+
+def _find_free_port(host: str = _LAUNCH_HOST) -> int:
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+        sock.bind((host, 0))
+        sock.listen(1)
+        return int(sock.getsockname()[1])
+
+
+def _wait_for_port(host: str, port: int, timeout_sec: float = 18.0, proc: Any = None) -> bool:
+    deadline = time.time() + float(timeout_sec)
+    while time.time() < deadline:
+        if _is_port_open(host, port):
+            return True
+        if proc is not None and not _is_process_alive(proc):
+            return False
+        time.sleep(0.2)
+    return _is_port_open(host, port)
+
+
+def _cleanup_launch_entry(entry: Dict[str, Any]) -> None:
+    for item in entry.get("processes", []) or []:
+        proc = item.get("proc")
+        handle = item.get("log_handle")
+        if _is_process_alive(proc):
+            try:
+                proc.terminate()
+                proc.wait(timeout=5)
+            except Exception:
+                try:
+                    proc.kill()
+                except Exception:
+                    pass
+        try:
+            if handle:
+                handle.close()
+        except Exception:
+            pass
+
+
+def _start_launch_process(
+    cmd: List[str],
+    cwd: str,
+    log_path: str,
+    label: str,
+    wait_port: Optional[int] = None,
+) -> Tuple[Optional[subprocess.Popen], Optional[Any], Optional[str]]:
+    os.makedirs(os.path.dirname(log_path), exist_ok=True)
+    handle = open(log_path, "w", encoding="utf-8")
+    handle.write(f"$ {' '.join(shlex.quote(part) for part in cmd)}\n\n")
+    handle.flush()
+    try:
+        proc = subprocess.Popen(
+            cmd,
+            cwd=cwd,
+            text=True,
+            stdout=handle,
+            stderr=subprocess.STDOUT,
+        )
+    except OSError as exc:
+        handle.write(f"{label} failed to start: {exc}\n")
+        handle.flush()
+        handle.close()
+        return None, None, f"{label} failed to start: {exc}"
+
+    if wait_port is not None and not _wait_for_port(_LAUNCH_HOST, wait_port, timeout_sec=18.0, proc=proc):
+        try:
+            proc.terminate()
+        except Exception:
+            pass
+        handle.write(f"{label} failed to bind {_LAUNCH_HOST}:{wait_port}\n")
+        handle.flush()
+        handle.close()
+        return None, None, f"{label} failed to bind {_LAUNCH_HOST}:{wait_port}"
+
+    return proc, handle, None
+
+
+def _launch_world_app(repo: str, branchpoint_id: str, world_id: str) -> Dict[str, Any]:
+    world = pw.load_world(repo, world_id)
+    worktree = os.path.realpath(str(world.get("worktree", "")).strip())
+    if not worktree or not os.path.isdir(worktree):
+        raise ValueError(f"world worktree missing: {worktree}")
+
+    meta_dir = os.path.join(worktree, ".parallel_worlds")
+    os.makedirs(meta_dir, exist_ok=True)
+
+    key = _launch_key(repo, branchpoint_id, world_id)
+    with _LAUNCH_LOCK:
+        existing = _WORLD_LAUNCHES.get(key)
+        if existing:
+            url = str(existing.get("url", "")).strip()
+            port = int(existing.get("port", 0) or 0)
+            proc_items = existing.get("processes", []) or []
+            alive = bool(proc_items) and all(_is_process_alive(item.get("proc")) for item in proc_items)
+            if url and port > 0 and alive and _is_port_open(_LAUNCH_HOST, port):
+                return {
+                    "ok": True,
+                    "url": url,
+                    "world": world_id,
+                    "mode": existing.get("mode"),
+                    "message": "reused existing app launch",
+                    "logs": existing.get("logs", []),
+                }
+            _cleanup_launch_entry(existing)
+            _WORLD_LAUNCHES.pop(key, None)
+
+        processes: List[Dict[str, Any]] = []
+        logs: List[str] = []
+
+        has_root_package = os.path.isfile(os.path.join(worktree, "package.json"))
+        has_webapp = os.path.isfile(os.path.join(worktree, "webapp", "package.json"))
+        has_pw_backend = os.path.isfile(os.path.join(worktree, "pw.py")) and os.path.isfile(os.path.join(worktree, "pw_web.py"))
+        has_index = os.path.isfile(os.path.join(worktree, "index.html"))
+
+        mode = ""
+        app_url = ""
+        app_port = 0
+
+        if has_webapp and shutil.which("npm"):
+            frontend_port = _find_free_port(_LAUNCH_HOST)
+            frontend_log = os.path.join(meta_dir, "launch-frontend.log")
+            frontend_cmd = ["npm", "--prefix", "webapp", "run", "dev", "--", "--host", _LAUNCH_HOST, "--port", str(frontend_port)]
+            proc, handle, err = _start_launch_process(frontend_cmd, worktree, frontend_log, "frontend", wait_port=frontend_port)
+            if err:
+                raise ValueError(err)
+            processes.append({"proc": proc, "log_handle": handle})
+            logs.append(frontend_log)
+
+            if has_pw_backend:
+                backend_port = _find_free_port(_LAUNCH_HOST)
+                backend_log = os.path.join(meta_dir, "launch-backend.log")
+                backend_cmd = [sys.executable, "pw.py", "web", "--host", _LAUNCH_HOST, "--port", str(backend_port)]
+                proc_b, handle_b, err_b = _start_launch_process(
+                    backend_cmd,
+                    worktree,
+                    backend_log,
+                    "backend",
+                    wait_port=backend_port,
+                )
+                if err_b:
+                    for p in processes:
+                        _cleanup_launch_entry({"processes": [p]})
+                    raise ValueError(err_b)
+                processes.append({"proc": proc_b, "log_handle": handle_b})
+                logs.append(backend_log)
+
+            mode = "webapp-dev"
+            app_port = frontend_port
+            app_url = f"http://{_LAUNCH_HOST}:{frontend_port}"
+        elif has_root_package and shutil.which("npm"):
+            port = _find_free_port(_LAUNCH_HOST)
+            log_path = os.path.join(meta_dir, "launch-dev.log")
+            cmd = ["npm", "run", "dev", "--", "--host", _LAUNCH_HOST, "--port", str(port)]
+            proc, handle, err = _start_launch_process(cmd, worktree, log_path, "dev server", wait_port=port)
+            if err:
+                raise ValueError(err)
+            processes.append({"proc": proc, "log_handle": handle})
+            logs.append(log_path)
+            mode = "node-dev"
+            app_port = port
+            app_url = f"http://{_LAUNCH_HOST}:{port}"
+        elif has_index:
+            port = _find_free_port(_LAUNCH_HOST)
+            log_path = os.path.join(meta_dir, "launch-static.log")
+            cmd = [sys.executable, "-m", "http.server", str(port), "--bind", _LAUNCH_HOST]
+            proc, handle, err = _start_launch_process(cmd, worktree, log_path, "static server", wait_port=port)
+            if err:
+                raise ValueError(err)
+            processes.append({"proc": proc, "log_handle": handle})
+            logs.append(log_path)
+            mode = "static-http"
+            app_port = port
+            app_url = f"http://{_LAUNCH_HOST}:{port}"
+        else:
+            raise ValueError(
+                "unable to launch app: expected webapp/package.json, package.json with dev script, or index.html"
+            )
+
+        entry = {
+            "world": world_id,
+            "mode": mode,
+            "url": app_url,
+            "port": app_port,
+            "logs": logs,
+            "processes": processes,
+            "started_at": _now_utc(),
+        }
+        _WORLD_LAUNCHES[key] = entry
+
+    return {
+        "ok": True,
+        "url": app_url,
+        "world": world_id,
+        "mode": mode,
+        "message": "app launched",
+        "logs": logs,
+    }
+
+
 class _TeeWriter(io.TextIOBase):
     def __init__(self, sink: io.StringIO, callback: Optional[Callable[[str], None]] = None):
         super().__init__()
@@ -1299,6 +1516,35 @@ class ParallelWorldsHandler(BaseHTTPRequestHandler):
                     return {"ok": ok, "output": output}
 
                 self._start_async_action("play", _play_job)
+                return
+
+            if action == "launch":
+                branchpoint_id = str(body.get("branchpoint", "")).strip() or pw.get_latest_branchpoint(repo)
+                world_id = str(body.get("world", "")).strip()
+                if not branchpoint_id:
+                    self._json(400, {"ok": False, "error": "branchpoint is required"})
+                    return
+                if not world_id:
+                    self._json(400, {"ok": False, "error": "world is required"})
+                    return
+                branchpoint = pw.load_branchpoint(repo, branchpoint_id)
+                if world_id not in (branchpoint.get("world_ids") or []):
+                    self._json(404, {"ok": False, "error": f"world not found in branchpoint: {world_id}"})
+                    return
+
+                def _launch_job(job_id: str) -> Dict[str, Any]:
+                    try:
+                        launched = _launch_world_app(repo=repo, branchpoint_id=branchpoint_id, world_id=world_id)
+                    except Exception as exc:
+                        return {"ok": False, "error": str(exc), "output": str(exc)}
+                    output = f"{launched.get('message')}: {launched.get('url')}"
+                    logs = launched.get("logs") or []
+                    if logs:
+                        output = output + "\n" + "\n".join(f"log: {pw.relative_to_repo(str(path), repo)}" for path in logs)
+                    launched["output"] = output
+                    return launched
+
+                self._start_async_action("launch", _launch_job)
                 return
 
             if action == "select":

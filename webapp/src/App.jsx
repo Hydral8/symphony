@@ -108,7 +108,7 @@ export default function App() {
 
   const [autopilot, setAutopilot] = useState({
     prompt: "",
-    count: "",
+    count: "4",
     maxCount: "4",
     fromRef: "",
     strategies: "",
@@ -120,7 +120,7 @@ export default function App() {
 
   const [kickoff, setKickoff] = useState({
     intent: "",
-    count: "",
+    count: "4",
     maxCount: "4",
     fromRef: "",
     strategies: "",
@@ -402,8 +402,10 @@ export default function App() {
       } else if (refresh) {
         await loadDashboard(selectedBranchpoint, false);
       }
+      return result;
     } catch (err) {
       setError(err.message);
+      return null;
     } finally {
       setBusy(false);
     }
@@ -499,6 +501,68 @@ export default function App() {
       },
       { switchToLatest: true },
     );
+  }
+
+  async function launchWorld(worldId, popupWindow = null) {
+    const result = await postAction(
+      "launch",
+      {
+        branchpoint: selectedBranchpoint || "",
+        world: worldId,
+      },
+      { refresh: false },
+    );
+    const url = String(result?.url || "").trim();
+    if (!url) {
+      if (popupWindow && !popupWindow.closed) {
+        popupWindow.close();
+      }
+      return;
+    }
+    if (popupWindow && !popupWindow.closed) {
+      popupWindow.location.href = url;
+      return;
+    }
+    window.open(url, "_blank", "noopener,noreferrer");
+  }
+
+  async function runOrPlayAndLaunch(mode, worldId) {
+    let popupWindow = null;
+    try {
+      popupWindow = window.open("about:blank", "_blank", "noopener,noreferrer");
+      if (popupWindow && popupWindow.document) {
+        popupWindow.document.title = "Launching App";
+        popupWindow.document.body.innerHTML = "<p style='font-family:sans-serif;padding:16px'>Preparing app...</p>";
+      }
+    } catch (err) {
+      popupWindow = null;
+    }
+
+    const isPlay = mode === "play";
+    const action = isPlay ? "play" : "run";
+    const payload = isPlay
+      ? {
+          branchpoint: selectedBranchpoint || "",
+          worlds: worldId,
+          render_command: playForm.renderCommand.trim() || null,
+          timeout: asInt(playForm.timeout),
+          preview_lines: asInt(playForm.previewLines),
+        }
+      : {
+          branchpoint: selectedBranchpoint || "",
+          worlds: worldId,
+          skip_codex: runForm.skipCodex,
+          skip_runner: runForm.skipRunner,
+        };
+
+    const result = await postAction(action, payload);
+    if (!result || result.ok === false) {
+      if (popupWindow && !popupWindow.closed) {
+        popupWindow.close();
+      }
+      return;
+    }
+    await launchWorld(worldId, popupWindow);
   }
 
   function toggleCompareWorld(worldId) {
@@ -942,7 +1006,7 @@ export default function App() {
               />
             </label>
           </div>
-          <p className="subtle">If exact count is set, it is used directly; otherwise the model chooses from 1..max.</p>
+          <p className="subtle">Exact count is authoritative for new branchpoints. It does not change existing branchpoints.</p>
           <label>
             Strategies (optional, one per line: <code>name::notes</code>)
             <textarea
@@ -1051,7 +1115,7 @@ export default function App() {
               />
             </label>
           </div>
-          <p className="subtle">If exact count is set, it is used directly; otherwise the model chooses from 1..max.</p>
+          <p className="subtle">Exact count is authoritative for new branchpoints. It does not change existing branchpoints.</p>
           <label>
             Strategies (optional)
             <textarea
@@ -1337,6 +1401,12 @@ export default function App() {
                     </button>
                     <button className="btn small" disabled={busy} onClick={() => postAction("play", { branchpoint: selectedBranchpoint || "", worlds: world.id })}>
                       Play
+                    </button>
+                    <button className="btn small ghost" disabled={busy} onClick={() => runOrPlayAndLaunch("run", world.id)}>
+                      Run + Open
+                    </button>
+                    <button className="btn small ghost" disabled={busy} onClick={() => runOrPlayAndLaunch("play", world.id)}>
+                      Play + Open
                     </button>
                     <button className="btn small" disabled={busy} onClick={() => postAction("select", { branchpoint: selectedBranchpoint || "", world: world.id, merge: false })}>
                       Select

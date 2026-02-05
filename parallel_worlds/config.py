@@ -3,6 +3,8 @@ import os
 from typing import Any, Dict
 
 from .common import deep_merge, die
+from .render_helper import DEFAULT_RENDER_COMMAND
+from .runner_helper import DEFAULT_RUNNER_COMMAND
 
 
 DEFAULT_CONFIG: Dict[str, Any] = {
@@ -11,7 +13,7 @@ DEFAULT_CONFIG: Dict[str, Any] = {
     "worlds_dir": "/tmp/parallel_worlds_worlds",
     "default_world_count": 3,
     "runner": {
-        "command": "",
+        "command": DEFAULT_RUNNER_COMMAND,
         "timeout_sec": 300,
     },
     "codex": {
@@ -28,7 +30,7 @@ DEFAULT_CONFIG: Dict[str, Any] = {
         },
     },
     "render": {
-        "command": "",
+        "command": DEFAULT_RENDER_COMMAND,
         "timeout_sec": 180,
         "preview_lines": 25,
     },
@@ -98,6 +100,8 @@ def load_config(path: str) -> Dict[str, Any]:
     runner_cmd = runner.get("command", "")
     if not isinstance(runner_cmd, str):
         die("config.runner.command must be a string")
+    if not runner_cmd.strip():
+        runner_cmd = str(DEFAULT_CONFIG["runner"]["command"])
 
     try:
         timeout = int(runner.get("timeout_sec", 300))
@@ -105,6 +109,7 @@ def load_config(path: str) -> Dict[str, Any]:
         die("config.runner.timeout_sec must be an integer")
     if timeout <= 0:
         die("config.runner.timeout_sec must be > 0")
+    cfg["runner"]["command"] = runner_cmd
     cfg["runner"]["timeout_sec"] = timeout
 
     codex = cfg.get("codex", {})
@@ -160,6 +165,8 @@ def load_config(path: str) -> Dict[str, Any]:
     render_cmd = render.get("command", "")
     if not isinstance(render_cmd, str):
         die("config.render.command must be a string")
+    if not render_cmd.strip():
+        render_cmd = str(DEFAULT_CONFIG["render"]["command"])
     try:
         render_timeout = int(render.get("timeout_sec", 180))
     except (TypeError, ValueError):
@@ -172,6 +179,7 @@ def load_config(path: str) -> Dict[str, Any]:
         die("config.render.preview_lines must be an integer")
     if preview_lines < 0:
         die("config.render.preview_lines must be >= 0")
+    cfg["render"]["command"] = render_cmd
     cfg["render"]["timeout_sec"] = render_timeout
     cfg["render"]["preview_lines"] = preview_lines
 

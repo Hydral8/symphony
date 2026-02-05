@@ -8,6 +8,7 @@ from typing import Any, Dict, List, Set, Tuple
 
 from .common import die, git, now_utc
 from .render_helper import ensure_render_helper
+from .runner_helper import DEFAULT_RUNNER_COMMAND, ensure_runner_helper
 
 
 VISUAL_EXTENSIONS: Set[str] = {
@@ -112,6 +113,10 @@ def build_codex_prompt(
     lines.append("- Keep changes scoped to this intent.")
     lines.append("- After edits, run relevant tests or checks for this repo.")
     lines.append("- Summarize what changed, tradeoffs, and residual risks.")
+    lines.append(
+        "- If `parallel_worlds.json` exists, ensure `runner.command` and `render.command` are configured "
+        "(`python3 .parallel_worlds/runner_auto.py` and `python3 .parallel_worlds/render_auto.py`)."
+    )
     lines.append("- Do not commit `.parallel_worlds/`, `report.md`, or `play.md`.")
 
     lines.append("")
@@ -446,6 +451,8 @@ def run_world(world: Dict[str, Any], branchpoint: Dict[str, Any], runner_cmd: st
     ensure_world_exists(world["worktree"])
     world_meta_dir = os.path.join(world["worktree"], ".parallel_worlds")
     os.makedirs(world_meta_dir, exist_ok=True)
+    ensure_runner_helper(world_meta_dir)
+    effective_runner_cmd = (runner_cmd or "").strip() or DEFAULT_RUNNER_COMMAND
 
     payload: Dict[str, Any] = {
         "branchpoint_id": branchpoint["id"],
@@ -453,7 +460,7 @@ def run_world(world: Dict[str, Any], branchpoint: Dict[str, Any], runner_cmd: st
         "world_name": world["name"],
         "branch": world["branch"],
         "worktree": world["worktree"],
-        "runner": runner_cmd,
+        "runner": effective_runner_cmd,
         "started_at": now_utc(),
         "exit_code": None,
         "duration_sec": None,
@@ -467,11 +474,9 @@ def run_world(world: Dict[str, Any], branchpoint: Dict[str, Any], runner_cmd: st
 
     if skip_runner:
         payload["error"] = "runner skipped via --skip-runner"
-    elif not runner_cmd.strip():
-        payload["error"] = "runner command not configured"
     else:
         cmd_result = execute_logged_command(
-            command=runner_cmd,
+            command=effective_runner_cmd,
             cwd=world["worktree"],
             timeout_sec=timeout_sec,
             meta_dir=world_meta_dir,
