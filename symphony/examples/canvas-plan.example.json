@@ -1,0 +1,270 @@
+{
+  "schema_version": "1.0",
+  "project_id": "8f0ddfdf-ae54-4d01-9d39-3cc41df70872",
+  "plan_id": "66937f87-9bf3-4d40-a9d1-c46cc0e57643",
+  "version": 3,
+  "created_at": "2026-02-05T12:00:00Z",
+  "updated_at": "2026-02-05T12:30:00Z",
+  "metadata": {
+    "name": "Symphony",
+    "vision": "Plan software visually, compile to task graph, execute with Codex agents.",
+    "goals": [
+      "Keep humans in strategic control.",
+      "Run implementation in parallel branches.",
+      "Show transparent progress and steering controls."
+    ],
+    "default_target_branch": "main",
+    "constraints": {
+      "tech_stack": [
+        "python",
+        "react",
+        "postgres"
+      ],
+      "non_functional_requirements": [
+        "Deterministic replay of agent runs",
+        "Task-level audit trail"
+      ],
+      "excluded_paths": [
+        "webapp/node_modules"
+      ]
+    }
+  },
+  "layers": [
+    {
+      "id": "layer_vision",
+      "name": "Vision",
+      "kind": "vision",
+      "pov": "product",
+      "order": 1,
+      "nodes": [
+        {
+          "id": "node_vision_core",
+          "layer_id": "layer_vision",
+          "type": "vision",
+          "label": "AI-Native Builder",
+          "summary": "Humans plan, AI agents code.",
+          "details_markdown": "Symphony acts as planning + orchestration control plane.",
+          "tags": [
+            "north-star"
+          ],
+          "priority": "critical",
+          "estimate": {
+            "tshirt": "M",
+            "points": 8
+          },
+          "acceptance_criteria": [
+            "Planning canvas exists.",
+            "Compiler produces runnable task graph."
+          ],
+          "position": {
+            "x": 120,
+            "y": 80
+          },
+          "size": {
+            "w": 360,
+            "h": 180
+          },
+          "status": "approved",
+          "ai_context": {
+            "prompt_intent": "Translate vision into modules and runnable tasks.",
+            "constraints": [
+              "Keep scope MVP."
+            ],
+            "references": [
+              {
+                "kind": "doc",
+                "value": "SYMPHONY_ONE_PAGE_SPEC.md"
+              }
+            ]
+          }
+        }
+      ],
+      "edges": []
+    },
+    {
+      "id": "layer_modules",
+      "name": "Modules",
+      "kind": "module",
+      "pov": "engineering",
+      "order": 2,
+      "nodes": [
+        {
+          "id": "node_module_canvas",
+          "layer_id": "layer_modules",
+          "type": "module",
+          "label": "Planning Canvas",
+          "summary": "Multi-layer drag-and-drop planning surface.",
+          "position": {
+            "x": 120,
+            "y": 320
+          },
+          "size": {
+            "w": 280,
+            "h": 140
+          },
+          "status": "approved",
+          "acceptance_criteria": [
+            "Users can add/edit nodes and edges.",
+            "Plan can be saved as JSON."
+          ]
+        },
+        {
+          "id": "node_module_orchestrator",
+          "layer_id": "layer_modules",
+          "type": "module",
+          "label": "Orchestrator",
+          "summary": "Schedules tasks and manages Codex agent runs.",
+          "position": {
+            "x": 460,
+            "y": 320
+          },
+          "size": {
+            "w": 280,
+            "h": 140
+          },
+          "status": "approved",
+          "acceptance_criteria": [
+            "Task DAG execution with dependency checks.",
+            "Pause/resume/stop controls."
+          ]
+        }
+      ],
+      "edges": [
+        {
+          "id": "edge_module_1",
+          "source": "node_module_canvas",
+          "target": "node_module_orchestrator",
+          "relation": "informs",
+          "required": true,
+          "notes": "Orchestrator consumes compiled plan data."
+        }
+      ]
+    },
+    {
+      "id": "layer_uxui",
+      "name": "UX/UI",
+      "kind": "uxui",
+      "pov": "design",
+      "order": 3,
+      "nodes": [
+        {
+          "id": "node_screen_progress",
+          "layer_id": "layer_uxui",
+          "type": "screen",
+          "label": "Progress Diagram",
+          "summary": "DAG view with task state and running agent counts.",
+          "position": {
+            "x": 120,
+            "y": 540
+          },
+          "size": {
+            "w": 300,
+            "h": 140
+          },
+          "status": "validated",
+          "acceptance_criteria": [
+            "User sees blocked/running/done states.",
+            "User can click task to inspect logs."
+          ]
+        }
+      ],
+      "edges": []
+    },
+    {
+      "id": "layer_backend",
+      "name": "Backend",
+      "kind": "backend",
+      "pov": "engineering",
+      "order": 4,
+      "nodes": [
+        {
+          "id": "node_api_compile",
+          "layer_id": "layer_backend",
+          "type": "api",
+          "label": "Compile API",
+          "summary": "Converts canvas plan into executable graph JSON.",
+          "position": {
+            "x": 460,
+            "y": 540
+          },
+          "size": {
+            "w": 300,
+            "h": 140
+          },
+          "status": "approved",
+          "acceptance_criteria": [
+            "Validates plan schema.",
+            "Produces tasks + dependencies."
+          ]
+        },
+        {
+          "id": "node_db_runs",
+          "layer_id": "layer_backend",
+          "type": "db_model",
+          "label": "Run/Event Storage",
+          "summary": "Stores orchestrator runs, agent runs, and events.",
+          "position": {
+            "x": 820,
+            "y": 540
+          },
+          "size": {
+            "w": 300,
+            "h": 140
+          },
+          "status": "approved",
+          "acceptance_criteria": [
+            "Append-only event stream for timeline.",
+            "Queryable run summaries."
+          ]
+        }
+      ],
+      "edges": [
+        {
+          "id": "edge_backend_1",
+          "source": "node_api_compile",
+          "target": "node_db_runs",
+          "relation": "writes_to",
+          "required": true
+        }
+      ]
+    }
+  ],
+  "cross_layer_edges": [
+    {
+      "id": "edge_cross_1",
+      "source": "node_vision_core",
+      "target": "node_module_canvas",
+      "relation": "contains",
+      "required": true
+    },
+    {
+      "id": "edge_cross_2",
+      "source": "node_vision_core",
+      "target": "node_module_orchestrator",
+      "relation": "contains",
+      "required": true
+    },
+    {
+      "id": "edge_cross_3",
+      "source": "node_module_orchestrator",
+      "target": "node_screen_progress",
+      "relation": "implements",
+      "required": true
+    },
+    {
+      "id": "edge_cross_4",
+      "source": "node_module_orchestrator",
+      "target": "node_api_compile",
+      "relation": "implements",
+      "required": true
+    }
+  ],
+  "orchestrator_preferences": {
+    "max_parallel_agents": 4,
+    "retry_limit": 2,
+    "quality_gates": [
+      "unit-tests",
+      "lint"
+    ]
+  }
+}

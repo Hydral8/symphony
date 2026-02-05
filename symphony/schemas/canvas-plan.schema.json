@@ -1,0 +1,447 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://symphony.dev/schemas/canvas-plan.schema.json",
+  "title": "Symphony Canvas Plan",
+  "description": "Visual, multi-layer plan authored by humans before orchestration.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "project_id",
+    "plan_id",
+    "version",
+    "metadata",
+    "layers"
+  ],
+  "properties": {
+    "schema_version": {
+      "type": "string",
+      "const": "1.0"
+    },
+    "project_id": {
+      "$ref": "#/$defs/uuid"
+    },
+    "plan_id": {
+      "$ref": "#/$defs/uuid"
+    },
+    "version": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "created_at": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "updated_at": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "metadata": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "name",
+        "vision",
+        "goals"
+      ],
+      "properties": {
+        "name": {
+          "type": "string",
+          "minLength": 1
+        },
+        "vision": {
+          "type": "string",
+          "minLength": 1
+        },
+        "goals": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "default_target_branch": {
+          "type": "string",
+          "default": "main"
+        },
+        "constraints": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "tech_stack": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "non_functional_requirements": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "excluded_paths": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            }
+          }
+        }
+      }
+    },
+    "layers": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "$ref": "#/$defs/layer"
+      }
+    },
+    "cross_layer_edges": {
+      "type": "array",
+      "default": [],
+      "items": {
+        "$ref": "#/$defs/edge"
+      }
+    },
+    "orchestrator_preferences": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "max_parallel_agents": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 50
+        },
+        "retry_limit": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 10
+        },
+        "quality_gates": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      }
+    }
+  },
+  "$defs": {
+    "uuid": {
+      "type": "string",
+      "pattern": "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-5][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}$"
+    },
+    "node_id": {
+      "type": "string",
+      "pattern": "^node_[a-zA-Z0-9_-]+$"
+    },
+    "layer_id": {
+      "type": "string",
+      "pattern": "^layer_[a-zA-Z0-9_-]+$"
+    },
+    "edge_id": {
+      "type": "string",
+      "pattern": "^edge_[a-zA-Z0-9_-]+$"
+    },
+    "reference": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "kind",
+        "value"
+      ],
+      "properties": {
+        "kind": {
+          "type": "string",
+          "enum": [
+            "file",
+            "url",
+            "node",
+            "artifact",
+            "doc"
+          ]
+        },
+        "value": {
+          "type": "string",
+          "minLength": 1
+        },
+        "note": {
+          "type": "string"
+        }
+      }
+    },
+    "position": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "x",
+        "y"
+      ],
+      "properties": {
+        "x": {
+          "type": "number"
+        },
+        "y": {
+          "type": "number"
+        }
+      }
+    },
+    "size": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "w",
+        "h"
+      ],
+      "properties": {
+        "w": {
+          "type": "number",
+          "exclusiveMinimum": 0
+        },
+        "h": {
+          "type": "number",
+          "exclusiveMinimum": 0
+        }
+      }
+    },
+    "node_ai_context": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "prompt_intent": {
+          "type": "string"
+        },
+        "constraints": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "references": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/reference"
+          }
+        }
+      }
+    },
+    "node": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "layer_id",
+        "type",
+        "label",
+        "summary",
+        "position",
+        "size",
+        "status"
+      ],
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/node_id"
+        },
+        "layer_id": {
+          "$ref": "#/$defs/layer_id"
+        },
+        "type": {
+          "type": "string",
+          "enum": [
+            "vision",
+            "goal",
+            "module",
+            "component",
+            "screen",
+            "ux_flow",
+            "api",
+            "db_model",
+            "workflow",
+            "task",
+            "note"
+          ]
+        },
+        "label": {
+          "type": "string",
+          "minLength": 1
+        },
+        "summary": {
+          "type": "string",
+          "minLength": 1
+        },
+        "details_markdown": {
+          "type": "string"
+        },
+        "tags": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "priority": {
+          "type": "string",
+          "enum": [
+            "low",
+            "medium",
+            "high",
+            "critical"
+          ],
+          "default": "medium"
+        },
+        "estimate": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "tshirt": {
+              "type": "string",
+              "enum": [
+                "XS",
+                "S",
+                "M",
+                "L",
+                "XL"
+              ]
+            },
+            "points": {
+              "type": "integer",
+              "minimum": 1
+            }
+          }
+        },
+        "acceptance_criteria": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "position": {
+          "$ref": "#/$defs/position"
+        },
+        "size": {
+          "$ref": "#/$defs/size"
+        },
+        "status": {
+          "type": "string",
+          "enum": [
+            "draft",
+            "validated",
+            "approved",
+            "deprecated"
+          ]
+        },
+        "ai_context": {
+          "$ref": "#/$defs/node_ai_context"
+        }
+      }
+    },
+    "edge": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "source",
+        "target",
+        "relation"
+      ],
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/edge_id"
+        },
+        "source": {
+          "$ref": "#/$defs/node_id"
+        },
+        "target": {
+          "$ref": "#/$defs/node_id"
+        },
+        "relation": {
+          "type": "string",
+          "enum": [
+            "depends_on",
+            "implements",
+            "informs",
+            "blocks",
+            "contains",
+            "uses_api",
+            "reads_from",
+            "writes_to",
+            "tests"
+          ]
+        },
+        "required": {
+          "type": "boolean",
+          "default": true
+        },
+        "notes": {
+          "type": "string"
+        },
+        "gates": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    "layer": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "name",
+        "kind",
+        "pov",
+        "order",
+        "nodes",
+        "edges"
+      ],
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/layer_id"
+        },
+        "name": {
+          "type": "string",
+          "minLength": 1
+        },
+        "kind": {
+          "type": "string",
+          "enum": [
+            "vision",
+            "module",
+            "uxui",
+            "backend",
+            "data",
+            "infra",
+            "task"
+          ]
+        },
+        "pov": {
+          "type": "string",
+          "enum": [
+            "product",
+            "design",
+            "engineering",
+            "ops"
+          ]
+        },
+        "order": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "nodes": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/node"
+          }
+        },
+        "edges": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/edge"
+          }
+        }
+      }
+    }
+  }
+}

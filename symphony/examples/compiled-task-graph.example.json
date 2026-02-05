@@ -1,0 +1,311 @@
+{
+  "schema_version": "1.0",
+  "graph_id": "b5f7dd88-fffd-45c0-96f3-8c4825f3f2ad",
+  "compiler_version": "0.1.0",
+  "compiled_at": "2026-02-05T12:31:00Z",
+  "source_plan": {
+    "project_id": "8f0ddfdf-ae54-4d01-9d39-3cc41df70872",
+    "plan_id": "66937f87-9bf3-4d40-a9d1-c46cc0e57643",
+    "plan_version": 3,
+    "plan_hash": "sha256:7f2d750b8df49f5ac26d5b7689b8dcfdbab4282dca0ae2e57b9b95ce34f1d2fe"
+  },
+  "orchestrator": {
+    "max_parallel_agents": 4,
+    "retry_limit": 2,
+    "target_branch": "main",
+    "merge_strategy": "squash",
+    "quality_gates": [
+      "unit-tests",
+      "lint"
+    ]
+  },
+  "tasks": [
+    {
+      "task_id": "task_canvas_v1",
+      "source_node_id": "node_module_canvas",
+      "title": "Build planning canvas interactions",
+      "objective": "Implement node/edge CRUD for multi-layer canvas.",
+      "instructions": "Persist canvas state as schema-compliant JSON and support drag/drop.",
+      "acceptance_criteria": [
+        "User can add, edit, move, and delete nodes.",
+        "User can add and delete edges.",
+        "Plan save payload validates against canvas-plan schema."
+      ],
+      "inputs": [
+        {
+          "kind": "node",
+          "value": "node_module_canvas"
+        },
+        {
+          "kind": "file",
+          "value": "webapp/src/App.jsx"
+        }
+      ],
+      "outputs": [
+        "Canvas UI interactions implemented",
+        "Serialized plan payload"
+      ],
+      "labels": [
+        "frontend",
+        "canvas",
+        "mvp"
+      ],
+      "priority": 5,
+      "size": "L",
+      "parallelizable": true,
+      "capabilities": [
+        "frontend",
+        "testing"
+      ],
+      "human_checkpoints": [
+        "Review UX flow before merge"
+      ],
+      "execution": {
+        "agent": {
+          "type": "codex",
+          "model": "gpt-5-codex",
+          "temperature": 0.2
+        },
+        "workspace": {
+          "base_ref": "main",
+          "branch": "world/symphony/task_canvas_v1",
+          "worktree_hint": "/tmp/symphony/task_canvas_v1"
+        },
+        "budget": {
+          "max_attempts": 3,
+          "timeout_sec": 1800,
+          "max_input_tokens": 16000,
+          "max_output_tokens": 4000
+        },
+        "check_commands": [
+          "npm --prefix webapp run build"
+        ]
+      },
+      "status": "pending"
+    },
+    {
+      "task_id": "task_compile_api_v1",
+      "source_node_id": "node_api_compile",
+      "title": "Implement plan compiler API",
+      "objective": "Create endpoint that converts plan JSON to task graph JSON.",
+      "instructions": "Validate input schema, generate tasks/dependencies, return compiled graph.",
+      "acceptance_criteria": [
+        "Invalid plan payload returns structured validation errors.",
+        "Valid payload compiles into deterministic task graph.",
+        "Compile endpoint returns graph_id and task counts."
+      ],
+      "inputs": [
+        {
+          "kind": "node",
+          "value": "node_api_compile"
+        },
+        {
+          "kind": "doc",
+          "value": "symphony/schemas/canvas-plan.schema.json"
+        }
+      ],
+      "outputs": [
+        "Compile API endpoint",
+        "Compiled graph schema response"
+      ],
+      "labels": [
+        "backend",
+        "compiler",
+        "api"
+      ],
+      "priority": 5,
+      "size": "M",
+      "parallelizable": true,
+      "capabilities": [
+        "backend",
+        "testing"
+      ],
+      "human_checkpoints": [
+        "Review compile heuristic quality"
+      ],
+      "execution": {
+        "agent": {
+          "type": "codex",
+          "model": "gpt-5-codex",
+          "temperature": 0.1
+        },
+        "workspace": {
+          "base_ref": "main",
+          "branch": "world/symphony/task_compile_api_v1",
+          "worktree_hint": "/tmp/symphony/task_compile_api_v1"
+        },
+        "budget": {
+          "max_attempts": 3,
+          "timeout_sec": 1500,
+          "max_input_tokens": 14000,
+          "max_output_tokens": 3500
+        },
+        "check_commands": [
+          "python3 -m pytest -q"
+        ]
+      },
+      "status": "pending"
+    },
+    {
+      "task_id": "task_orchestrator_v1",
+      "source_node_id": "node_module_orchestrator",
+      "title": "Build orchestrator task runner",
+      "objective": "Execute compiled DAG with dependency-aware scheduling and controls.",
+      "instructions": "Support pause/resume/stop and persist task/agent run events.",
+      "acceptance_criteria": [
+        "Only runnable tasks are dispatched.",
+        "Pause and resume work at task level.",
+        "Task and agent events are persisted."
+      ],
+      "inputs": [
+        {
+          "kind": "node",
+          "value": "node_module_orchestrator"
+        },
+        {
+          "kind": "artifact",
+          "value": "task_compile_api_v1"
+        }
+      ],
+      "outputs": [
+        "Orchestrator service",
+        "Task lifecycle state transitions"
+      ],
+      "labels": [
+        "backend",
+        "orchestrator",
+        "agent-runtime"
+      ],
+      "priority": 5,
+      "size": "L",
+      "parallelizable": false,
+      "capabilities": [
+        "backend",
+        "infra",
+        "testing"
+      ],
+      "execution": {
+        "agent": {
+          "type": "codex",
+          "model": "gpt-5-codex"
+        },
+        "workspace": {
+          "base_ref": "main",
+          "branch": "world/symphony/task_orchestrator_v1",
+          "worktree_hint": "/tmp/symphony/task_orchestrator_v1"
+        },
+        "budget": {
+          "max_attempts": 4,
+          "timeout_sec": 2400,
+          "max_input_tokens": 20000,
+          "max_output_tokens": 5000
+        },
+        "check_commands": [
+          "python3 -m pytest -q"
+        ]
+      },
+      "status": "pending"
+    },
+    {
+      "task_id": "task_progress_ui_v1",
+      "source_node_id": "node_screen_progress",
+      "title": "Implement progress diagram view",
+      "objective": "Visualize DAG task states and live agent counts in the UI.",
+      "instructions": "Render nodes by status and allow click-through to logs.",
+      "acceptance_criteria": [
+        "Progress UI shows pending/running/blocked/done/failed.",
+        "Running agent count updates in real time.",
+        "Task detail drawer shows latest logs and artifacts."
+      ],
+      "inputs": [
+        {
+          "kind": "node",
+          "value": "node_screen_progress"
+        },
+        {
+          "kind": "artifact",
+          "value": "task_orchestrator_v1"
+        }
+      ],
+      "outputs": [
+        "Progress screen",
+        "Live run detail interactions"
+      ],
+      "labels": [
+        "frontend",
+        "progress",
+        "observability"
+      ],
+      "priority": 4,
+      "size": "M",
+      "parallelizable": false,
+      "capabilities": [
+        "frontend",
+        "backend",
+        "testing"
+      ],
+      "execution": {
+        "agent": {
+          "type": "codex",
+          "model": "gpt-5-codex"
+        },
+        "workspace": {
+          "base_ref": "main",
+          "branch": "world/symphony/task_progress_ui_v1",
+          "worktree_hint": "/tmp/symphony/task_progress_ui_v1"
+        },
+        "budget": {
+          "max_attempts": 3,
+          "timeout_sec": 1800,
+          "max_input_tokens": 16000,
+          "max_output_tokens": 4000
+        },
+        "check_commands": [
+          "npm --prefix webapp run build"
+        ]
+      },
+      "status": "pending"
+    }
+  ],
+  "dependencies": [
+    {
+      "from_task_id": "task_compile_api_v1",
+      "to_task_id": "task_orchestrator_v1",
+      "type": "hard_block",
+      "reason": "Orchestrator consumes compiler output."
+    },
+    {
+      "from_task_id": "task_orchestrator_v1",
+      "to_task_id": "task_progress_ui_v1",
+      "type": "hard_block",
+      "reason": "Progress UI requires orchestrator events."
+    }
+  ],
+  "stages": [
+    {
+      "stage_id": "stage_foundation",
+      "name": "Foundation",
+      "task_ids": [
+        "task_canvas_v1",
+        "task_compile_api_v1"
+      ],
+      "unlock_condition": "all_done"
+    },
+    {
+      "stage_id": "stage_execution",
+      "name": "Execution",
+      "task_ids": [
+        "task_orchestrator_v1"
+      ],
+      "unlock_condition": "all_done"
+    },
+    {
+      "stage_id": "stage_observability",
+      "name": "Observability",
+      "task_ids": [
+        "task_progress_ui_v1"
+      ],
+      "unlock_condition": "all_done"
+    }
+  ]
+}

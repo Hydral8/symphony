@@ -1,0 +1,438 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://symphony.dev/schemas/compiled-task-graph.schema.json",
+  "title": "Symphony Compiled Task Graph",
+  "description": "Compiler output consumed by the orchestrator to run AI agents.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "graph_id",
+    "compiler_version",
+    "source_plan",
+    "orchestrator",
+    "tasks",
+    "dependencies"
+  ],
+  "properties": {
+    "schema_version": {
+      "type": "string",
+      "const": "1.0"
+    },
+    "graph_id": {
+      "$ref": "#/$defs/uuid"
+    },
+    "compiler_version": {
+      "type": "string",
+      "minLength": 1
+    },
+    "compiled_at": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "source_plan": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "project_id",
+        "plan_id",
+        "plan_version"
+      ],
+      "properties": {
+        "project_id": {
+          "$ref": "#/$defs/uuid"
+        },
+        "plan_id": {
+          "$ref": "#/$defs/uuid"
+        },
+        "plan_version": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "plan_hash": {
+          "type": "string",
+          "minLength": 8
+        }
+      }
+    },
+    "orchestrator": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "max_parallel_agents",
+        "retry_limit",
+        "target_branch",
+        "quality_gates"
+      ],
+      "properties": {
+        "max_parallel_agents": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 50
+        },
+        "retry_limit": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 10
+        },
+        "target_branch": {
+          "type": "string",
+          "default": "main"
+        },
+        "merge_strategy": {
+          "type": "string",
+          "enum": [
+            "merge",
+            "squash",
+            "rebase"
+          ],
+          "default": "squash"
+        },
+        "quality_gates": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    "tasks": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "$ref": "#/$defs/task"
+      }
+    },
+    "dependencies": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/dependency"
+      }
+    },
+    "stages": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/stage"
+      }
+    }
+  },
+  "$defs": {
+    "uuid": {
+      "type": "string",
+      "pattern": "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-5][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}$"
+    },
+    "task_id": {
+      "type": "string",
+      "pattern": "^task_[a-zA-Z0-9_-]+$"
+    },
+    "node_id": {
+      "type": "string",
+      "pattern": "^node_[a-zA-Z0-9_-]+$"
+    },
+    "reference": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "kind",
+        "value"
+      ],
+      "properties": {
+        "kind": {
+          "type": "string",
+          "enum": [
+            "node",
+            "file",
+            "artifact",
+            "url",
+            "doc"
+          ]
+        },
+        "value": {
+          "type": "string",
+          "minLength": 1
+        },
+        "note": {
+          "type": "string"
+        }
+      }
+    },
+    "agent_config": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "type",
+        "model"
+      ],
+      "properties": {
+        "type": {
+          "type": "string",
+          "enum": [
+            "codex"
+          ]
+        },
+        "model": {
+          "type": "string",
+          "minLength": 1
+        },
+        "temperature": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 2
+        }
+      }
+    },
+    "workspace_config": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "base_ref",
+        "branch",
+        "worktree_hint"
+      ],
+      "properties": {
+        "base_ref": {
+          "type": "string",
+          "minLength": 1
+        },
+        "branch": {
+          "type": "string",
+          "minLength": 1
+        },
+        "worktree_hint": {
+          "type": "string",
+          "minLength": 1
+        }
+      }
+    },
+    "budget_config": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "max_attempts",
+        "timeout_sec"
+      ],
+      "properties": {
+        "max_attempts": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 20
+        },
+        "timeout_sec": {
+          "type": "integer",
+          "minimum": 30
+        },
+        "max_input_tokens": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "max_output_tokens": {
+          "type": "integer",
+          "minimum": 1
+        }
+      }
+    },
+    "task": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "task_id",
+        "source_node_id",
+        "title",
+        "objective",
+        "acceptance_criteria",
+        "priority",
+        "parallelizable",
+        "capabilities",
+        "execution",
+        "status"
+      ],
+      "properties": {
+        "task_id": {
+          "$ref": "#/$defs/task_id"
+        },
+        "source_node_id": {
+          "$ref": "#/$defs/node_id"
+        },
+        "title": {
+          "type": "string",
+          "minLength": 1
+        },
+        "objective": {
+          "type": "string",
+          "minLength": 1
+        },
+        "instructions": {
+          "type": "string"
+        },
+        "acceptance_criteria": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "inputs": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/reference"
+          }
+        },
+        "outputs": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "labels": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "priority": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 5
+        },
+        "size": {
+          "type": "string",
+          "enum": [
+            "XS",
+            "S",
+            "M",
+            "L",
+            "XL"
+          ],
+          "default": "M"
+        },
+        "parallelizable": {
+          "type": "boolean"
+        },
+        "capabilities": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "string",
+            "enum": [
+              "product",
+              "frontend",
+              "backend",
+              "database",
+              "infra",
+              "testing"
+            ]
+          }
+        },
+        "human_checkpoints": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "execution": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "agent",
+            "workspace",
+            "budget"
+          ],
+          "properties": {
+            "agent": {
+              "$ref": "#/$defs/agent_config"
+            },
+            "workspace": {
+              "$ref": "#/$defs/workspace_config"
+            },
+            "budget": {
+              "$ref": "#/$defs/budget_config"
+            },
+            "check_commands": {
+              "type": "array",
+              "items": {
+                "type": "string",
+                "minLength": 1
+              }
+            }
+          }
+        },
+        "status": {
+          "type": "string",
+          "enum": [
+            "pending",
+            "running",
+            "blocked",
+            "paused",
+            "done",
+            "failed",
+            "stopped"
+          ]
+        }
+      }
+    },
+    "dependency": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "from_task_id",
+        "to_task_id",
+        "type"
+      ],
+      "properties": {
+        "from_task_id": {
+          "$ref": "#/$defs/task_id"
+        },
+        "to_task_id": {
+          "$ref": "#/$defs/task_id"
+        },
+        "type": {
+          "type": "string",
+          "enum": [
+            "hard_block",
+            "soft_block"
+          ],
+          "default": "hard_block"
+        },
+        "reason": {
+          "type": "string"
+        }
+      }
+    },
+    "stage": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "stage_id",
+        "name",
+        "task_ids",
+        "unlock_condition"
+      ],
+      "properties": {
+        "stage_id": {
+          "type": "string",
+          "pattern": "^stage_[a-zA-Z0-9_-]+$"
+        },
+        "name": {
+          "type": "string",
+          "minLength": 1
+        },
+        "task_ids": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/task_id"
+          }
+        },
+        "unlock_condition": {
+          "type": "string",
+          "enum": [
+            "all_done",
+            "any_done",
+            "manual"
+          ]
+        }
+      }
+    }
+  }
+}
