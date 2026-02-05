@@ -30,6 +30,14 @@ def renders_dir(repo: str) -> str:
     return os.path.join(metadata_root(repo), "renders")
 
 
+def task_controls_dir(repo: str) -> str:
+    return os.path.join(metadata_root(repo), "task_controls")
+
+
+def task_steering_dir(repo: str) -> str:
+    return os.path.join(metadata_root(repo), "task_steering")
+
+
 def task_graphs_dir(repo: str) -> str:
     return os.path.join(metadata_root(repo), "task_graphs")
 
@@ -60,6 +68,8 @@ def ensure_metadata_dirs(repo: str) -> None:
     os.makedirs(runs_dir(repo), exist_ok=True)
     os.makedirs(codex_runs_dir(repo), exist_ok=True)
     os.makedirs(renders_dir(repo), exist_ok=True)
+    os.makedirs(task_controls_dir(repo), exist_ok=True)
+    os.makedirs(task_steering_dir(repo), exist_ok=True)
     os.makedirs(task_graphs_dir(repo), exist_ok=True)
     os.makedirs(orchestrator_runs_dir(repo), exist_ok=True)
     os.makedirs(orchestrator_events_dir(repo), exist_ok=True)
@@ -99,6 +109,14 @@ def codex_run_file(repo: str, branchpoint_id: str, world_id: str) -> str:
 
 def render_file(repo: str, branchpoint_id: str, world_id: str) -> str:
     return os.path.join(renders_dir(repo), branchpoint_id, f"{world_id}.json")
+
+
+def task_control_file(repo: str, task_id: str) -> str:
+    return os.path.join(task_controls_dir(repo), f"{task_id}.json")
+
+
+def task_steering_file(repo: str, task_id: str) -> str:
+    return os.path.join(task_steering_dir(repo), f"{task_id}.json")
 
 
 def task_graph_file(repo: str, graph_id: str) -> str:
@@ -238,6 +256,40 @@ def save_codex_run(repo: str, branchpoint_id: str, world_id: str, payload: Dict[
 
 def save_render(repo: str, branchpoint_id: str, world_id: str, payload: Dict[str, Any]) -> None:
     write_json(render_file(repo, branchpoint_id, world_id), payload)
+
+
+def load_task_control(repo: str, task_id: str) -> Optional[Dict[str, Any]]:
+    path = task_control_file(repo, task_id)
+    if not os.path.exists(path):
+        return None
+    return read_json(path)
+
+
+def save_task_control(repo: str, task_id: str, payload: Dict[str, Any]) -> None:
+    write_json(task_control_file(repo, task_id), payload)
+
+
+def load_task_steering(repo: str, task_id: str) -> List[Dict[str, Any]]:
+    path = task_steering_file(repo, task_id)
+    if not os.path.exists(path):
+        return []
+    with open(path, "r", encoding="utf-8") as f:
+        payload = json.load(f)
+    if not isinstance(payload, list):
+        return []
+    out: List[Dict[str, Any]] = []
+    for row in payload:
+        if isinstance(row, dict):
+            out.append(row)
+    return out
+
+
+def save_task_steering(repo: str, task_id: str, payload: List[Dict[str, Any]]) -> None:
+    path = task_steering_file(repo, task_id)
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(payload, f, indent=2)
+        f.write("\n")
 
 
 def save_task_graph(repo: str, payload: Dict[str, Any]) -> None:
