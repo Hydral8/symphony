@@ -4,7 +4,7 @@
   "worlds_dir": "/tmp/parallel_worlds_worlds",
   "default_world_count": 3,
   "runner": {
-    "command": "",
+    "command": "python3 .parallel_worlds/runner_auto.py",
     "timeout_sec": 300
   },
   "codex": {
