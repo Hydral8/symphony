@@ -3,9 +3,11 @@
 
 import argparse
 
+from parallel_worlds.common import ensure_git_repo, relative_to_repo
 from parallel_worlds.commands import (
     autopilot_worlds,
     build_report,
+    create_project,
     init_workspace,
     kickoff_worlds,
     list_objects,
@@ -14,6 +16,18 @@ from parallel_worlds.commands import (
     refork_world,
     run_branchpoint,
     select_world,
+    switch_project,
+)
+from parallel_worlds.config import load_config
+from parallel_worlds.state import (
+    ensure_metadata_dirs,
+    get_latest_branchpoint,
+    list_branchpoints,
+    load_branchpoint,
+    load_codex_run,
+    load_render,
+    load_run,
+    load_world,
 )
 from parallel_worlds.common import ensure_git_repo, relative_to_repo
 from parallel_worlds.config import load_config
@@ -36,6 +50,16 @@ def main() -> None:
     init_p = sub.add_parser("init", help="initialize config + metadata")
     init_p.add_argument("-c", "--config", default="parallel_worlds.json")
     init_p.add_argument("--force", action="store_true", help="overwrite existing config")
+
+    new_project_p = sub.add_parser("new-project", help="create a new git project and initialize Parallel Worlds")
+    new_project_p.add_argument("--path", required=True, help="directory for the new project")
+    new_project_p.add_argument("--name", help="project display name used in README")
+    new_project_p.add_argument("--base-branch", default="main", help="initial branch name (default: main)")
+    new_project_p.add_argument("--config-name", default="parallel_worlds.json", help="config filename in project root")
+
+    switch_project_p = sub.add_parser("switch-project", help="switch context to another git project")
+    switch_project_p.add_argument("--path", required=True, help="path inside the target git repository")
+    switch_project_p.add_argument("--config-name", default="parallel_worlds.json", help="config filename in project root")
 
     kickoff_p = sub.add_parser("kickoff", help="create a branchpoint and worlds")
     kickoff_p.add_argument("-c", "--config", default="parallel_worlds.json")
@@ -129,6 +153,19 @@ def main() -> None:
 
     if args.cmd == "init":
         init_workspace(config_path=args.config, force=args.force)
+        return
+
+    if args.cmd == "new-project":
+        create_project(
+            project_path=args.path,
+            project_name=args.name,
+            base_branch=args.base_branch,
+            config_name=args.config_name,
+        )
+        return
+
+    if args.cmd == "switch-project":
+        switch_project(project_path=args.path, config_name=args.config_name)
         return
 
     if args.cmd == "kickoff":
