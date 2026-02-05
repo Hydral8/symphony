@@ -1,17 +1,121 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
+import { ReactFlow } from "@xyflow/react";
+import "@xyflow/react/dist/style.css";
 import NodeDetails from "../components/NodeDetails";
 import {
   EDGE_RELATIONS,
   LOCAL_STORAGE_KEY,
-  MAX_SCALE,
-  MIN_SCALE,
   NODE_TYPES,
-  WORLD_HEIGHT,
-  WORLD_WIDTH,
 } from "../lib/constants";
 import { randomId } from "../lib/ids";
-import { clamp, defaultPlan, nowIso, splitLines, validatePlan } from "../lib/plan";
+import { defaultPlan, nowIso, splitLines, validatePlan } from "../lib/plan";
 import { usePlanDraft } from "../hooks/usePlanDraft";
+
+function PlanNode({ data }) {
+  const {
+    node,
+    isEditing,
+    isSelected,
+    isConnectSource,
+    onStartEdit,
+    onFinishEdit,
+    onDetails,
+    onDelete,
+    onUpdate,
+  } = data;
+
+  return (
+    <div
+      className={`canvas-node ${isSelected ? "selected" : ""} ${isConnectSource ? "connect-source" : ""} ${isEditing ? "editing" : ""}`}
+      style={{ width: "100%", height: "100%", position: "relative" }}
+    >
+      <div className="node-header">
+        <span className="node-type">{node.type}</span>
+        <span className="node-status">{node.status}</span>
+      </div>
+      {isEditing ? (
+        <div
+          className="node-inline-edit nodrag"
+          onBlur={(event) => {
+            if (event.currentTarget.contains(event.relatedTarget)) return;
+            onFinishEdit();
+          }}
+        >
+          <input
+            className="node-edit-input nodrag"
+            value={node.label}
+            onChange={(e) => onUpdate({ label: e.target.value })}
+            onKeyDown={(e) => {
+              if (e.key === "Enter") {
+                e.preventDefault();
+                onFinishEdit();
+              }
+            }}
+            autoFocus
+          />
+          <textarea
+            className="node-edit-textarea nodrag"
+            value={node.summary}
+            onChange={(e) => onUpdate({ summary: e.target.value })}
+            rows={3}
+          />
+          <div className="node-inline-actions">
+            <button
+              className="btn small nodrag"
+              onClick={(event) => {
+                event.stopPropagation();
+                onFinishEdit();
+              }}
+            >
+              Done
+            </button>
+            <button
+              className="btn small ghost nodrag"
+              onClick={(event) => {
+                event.stopPropagation();
+                onDelete();
+              }}
+            >
+              Delete
+            </button>
+          </div>
+        </div>
+      ) : (
+        <>
+          <strong>{node.label}</strong>
+          <p>{node.summary}</p>
+          <div className="node-actions">
+            <button
+              className="node-chip nodrag"
+              onClick={(event) => {
+                event.stopPropagation();
+                onStartEdit();
+              }}
+            >
+              Edit
+            </button>
+            <button
+              className="node-chip nodrag"
+              onClick={(event) => {
+                event.stopPropagation();
+                onDetails();
+              }}
+            >
+              Details
+            </button>
+          </div>
+        </>
+      )}
+    </div>
+  );
+}
+
+const BASE_EDGE_STYLE = { stroke: "var(--ink-muted)", strokeWidth: 2 };
+const SELECTED_EDGE_STYLE = {
+  stroke: "var(--teal-glow)",
+  strokeWidth: 3,
+  filter: "drop-shadow(0 0 4px rgba(20, 184, 166, 0.5))",
+};
 
 export default function CanvasPlannerView() {
   const { plan, setPlan } = usePlanDraft();
@@ -35,11 +139,8 @@ export default function CanvasPlannerView() {
   const [nodeDetailsId, setNodeDetailsId] = useState(null);
   const [toast, setToast] = useState("");
 
-  const [viewport, setViewport] = useState({ x: 120, y: 120, scale: 1 });
-  const [panState, setPanState] = useState(null);
-  const [dragState, setDragState] = useState(null);
-
-  const viewportRef = useRef(null);
+  const reactFlowWrapperRef = useRef(null);
+  const reactFlowInstanceRef = useRef(null);
   const exportMenuRef = useRef(null);
 
   useEffect(() => {
@@ -80,48 +181,6 @@ export default function CanvasPlannerView() {
     const timer = window.setTimeout(() => setToast(""), 2400);
     return () => window.clearTimeout(timer);
   }, [toast]);
-
-  useEffect(() => {
-    if (!dragState && !panState) return;
-    function onPointerMove(event) {
-      if (dragState) {
-        const world = worldFromClient(event.clientX, event.clientY);
-        setPlan((prev) => ({
-          ...prev,
-          updated_at: nowIso(),
-          layers: prev.layers.map((layer) => ({
-            ...layer,
-            nodes: layer.nodes.map((node) =>
-              node.id === dragState.nodeId
-                ? {
-                    ...node,
-                    position: {
-                      x: Math.round(world.x - dragState.offsetX),
-                      y: Math.round(world.y - dragState.offsetY),
-                    },
-                  }
-                : node,
-            ),
-          })),
-        }));
-      }
-      if (panState) {
-        const deltaX = event.clientX - panState.startX;
-        const deltaY = event.clientY - panState.startY;
-        setViewport((prev) => ({ ...prev, x: panState.startPanX + deltaX, y: panState.startPanY + deltaY }));
-      }
-    }
-    function onPointerUp() {
-      setDragState(null);
-      setPanState(null);
-    }
-    window.addEventListener("pointermove", onPointerMove);
-    window.addEventListener("pointerup", onPointerUp);
-    return () => {
-      window.removeEventListener("pointermove", onPointerMove);
-      window.removeEventListener("pointerup", onPointerUp);
-    };
-  }, [dragState, panState, viewport.scale, viewport.x, viewport.y, setPlan]);
 
   const layersSorted = useMemo(
     () => [...plan.layers].sort((a, b) => (a.order || 0) - (b.order || 0)),
@@ -168,6 +227,59 @@ export default function CanvasPlannerView() {
     return null;
   }, [selectedEdgeKey, plan.cross_layer_edges, plan.layers]);
 
+  const nodeTypes = useMemo(() => ({ plan: PlanNode }), []);
+
+  const flowNodes = useMemo(
+    () =>
+      visibleNodes.map((node) => ({
+        id: node.id,
+        type: "plan",
+        position: node.position,
+        draggable: !connectMode.active,
+        selectable: false,
+        style: { width: node.size.w, height: node.size.h },
+        data: {
+          node,
+          isEditing: editingNodeId === node.id,
+          isSelected: selectedNodeId === node.id,
+          isConnectSource: connectFromId === node.id,
+          onStartEdit: () => setEditingNodeId(node.id),
+          onFinishEdit: () => setEditingNodeId(null),
+          onDetails: () => setNodeDetailsId(node.id),
+          onDelete: () => deleteNode(node.id),
+          onUpdate: (patch) => updateNode(node.id, patch),
+        },
+      })),
+    [
+      visibleNodes,
+      connectMode.active,
+      connectFromId,
+      deleteNode,
+      editingNodeId,
+      selectedNodeId,
+      setEditingNodeId,
+      setNodeDetailsId,
+      updateNode,
+    ],
+  );
+
+  const flowEdges = useMemo(
+    () =>
+      visibleEdges.map((entry) => {
+        const id = `${entry.scope}:${entry.edge.id}`;
+        const isSelected = selectedEdgeKey === id;
+        return {
+          id,
+          source: entry.edge.source,
+          target: entry.edge.target,
+          className: "edge-path",
+          style: isSelected ? SELECTED_EDGE_STYLE : BASE_EDGE_STYLE,
+          selectable: false,
+        };
+      }),
+    [selectedEdgeKey, visibleEdges],
+  );
+
   const validationErrors = useMemo(() => validatePlan(plan), [plan]);
   const exportJson = useMemo(() => JSON.stringify(plan, null, 2), [plan]);
 
@@ -179,24 +291,13 @@ export default function CanvasPlannerView() {
     });
   }
 
-  function worldFromClient(clientX, clientY) {
-    if (!viewportRef.current) return { x: 0, y: 0 };
-    const rect = viewportRef.current.getBoundingClientRect();
-    return {
-      x: (clientX - rect.left - viewport.x) / viewport.scale,
-      y: (clientY - rect.top - viewport.y) / viewport.scale,
-    };
-  }
-
   function viewportCenterWorld() {
-    if (!viewportRef.current) return { x: 0, y: 0 };
-    const rect = viewportRef.current.getBoundingClientRect();
-    const centerX = rect.width / 2;
-    const centerY = rect.height / 2;
-    return {
-      x: (centerX - viewport.x) / viewport.scale,
-      y: (centerY - viewport.y) / viewport.scale,
-    };
+    if (!reactFlowWrapperRef.current || !reactFlowInstanceRef.current) return { x: 0, y: 0 };
+    const rect = reactFlowWrapperRef.current.getBoundingClientRect();
+    return reactFlowInstanceRef.current.screenToFlowPosition({
+      x: rect.left + rect.width / 2,
+      y: rect.top + rect.height / 2,
+    });
   }
 
   function resetDraft() {
@@ -306,50 +407,36 @@ export default function CanvasPlannerView() {
     setToast("Node removed.");
   }
 
-  function startDrag(event, node) {
-    if (connectMode.active) return;
-    if (event.target.closest("input, textarea, button, select")) return;
+  function handlePaneClick() {
+    setSelectedNodeId(null);
+    setSelectedEdgeKey(null);
+  }
+
+  function handleNodeClickEvent(event, flowNode) {
     event.stopPropagation();
-    const world = worldFromClient(event.clientX, event.clientY);
-    setDragState({
-      nodeId: node.id,
-      offsetX: world.x - node.position.x,
-      offsetY: world.y - node.position.y,
-    });
+    if (event.target.closest("input, textarea, button, select")) return;
+    const planNode = nodeMap.get(flowNode.id);
+    if (!planNode) return;
+    handleNodeClick(planNode);
   }
 
-  function handleCanvasPointerDown(event) {
-    if (event.button !== 0) return;
-    if (event.target.closest(".canvas-node")) return;
-    setPanState({
-      startX: event.clientX,
-      startY: event.clientY,
-      startPanX: viewport.x,
-      startPanY: viewport.y,
-    });
-    setSelectedNodeId(null);
-    setSelectedEdgeKey(null);
+  function handleNodeDoubleClick(event, flowNode) {
+    event.stopPropagation();
+    setEditingNodeId(flowNode.id);
   }
 
-  function handleCanvasClick(event) {
-    if (event.target.closest(".canvas-node")) return;
-    setSelectedNodeId(null);
-    setSelectedEdgeKey(null);
+  function handleNodeDragStop(event, flowNode) {
+    const planNode = nodeMap.get(flowNode.id);
+    if (!planNode) return;
+    const nextX = Math.round(flowNode.position.x);
+    const nextY = Math.round(flowNode.position.y);
+    if (nextX === planNode.position.x && nextY === planNode.position.y) return;
+    updateNode(planNode.id, { position: { x: nextX, y: nextY } });
   }
 
-  function handleWheel(event) {
-    event.preventDefault();
-    if (!viewportRef.current) return;
-    const rect = viewportRef.current.getBoundingClientRect();
-    const cursorX = event.clientX - rect.left;
-    const cursorY = event.clientY - rect.top;
-    const worldX = (cursorX - viewport.x) / viewport.scale;
-    const worldY = (cursorY - viewport.y) / viewport.scale;
-    const zoomFactor = event.deltaY > 0 ? 0.9 : 1.1;
-    const nextScale = clamp(viewport.scale * zoomFactor, MIN_SCALE, MAX_SCALE);
-    const nextPanX = cursorX - worldX * nextScale;
-    const nextPanY = cursorY - worldY * nextScale;
-    setViewport({ x: nextPanX, y: nextPanY, scale: nextScale });
+  function handleEdgeClick(event, flowEdge) {
+    event.stopPropagation();
+    setSelectedEdgeKey(flowEdge.id);
   }
 
   function handleNodeClick(node) {
@@ -612,108 +699,23 @@ export default function CanvasPlannerView() {
         <div className="layer-panel-footer">Active: {activeLayerLabel}</div>
       </aside>
 
-      <div
-        className="canvas-viewport"
-        ref={viewportRef}
-        onPointerDown={handleCanvasPointerDown}
-        onClick={handleCanvasClick}
-        onWheel={handleWheel}
-      >
-        <div
-          className="canvas-world"
-          style={{
-            transform: `translate(${viewport.x}px, ${viewport.y}px) scale(${viewport.scale})`,
+      <div className="canvas-viewport" ref={reactFlowWrapperRef} style={{ width: "100%", height: "100%" }}>
+        <ReactFlow
+          nodes={flowNodes}
+          edges={flowEdges}
+          nodeTypes={nodeTypes}
+          onInit={(instance) => {
+            reactFlowInstanceRef.current = instance;
           }}
-        >
-          <svg className="canvas-edges" width={WORLD_WIDTH} height={WORLD_HEIGHT} aria-hidden="true">
-            {visibleEdges.map((entry) => {
-              const source = nodeMap.get(entry.edge.source);
-              const target = nodeMap.get(entry.edge.target);
-              if (!source || !target) return null;
-              const x1 = source.position.x + source.size.w / 2;
-              const y1 = source.position.y + source.size.h / 2;
-              const x2 = target.position.x + target.size.w / 2;
-              const y2 = target.position.y + target.size.h / 2;
-              return (
-                <line
-                  key={`${entry.scope}:${entry.edge.id}`}
-                  x1={x1}
-                  y1={y1}
-                  x2={x2}
-                  y2={y2}
-                  className={`edge-line ${entry.scope === "cross" ? "cross" : ""}`}
-                  onPointerDown={(event) => event.stopPropagation()}
-                  onClick={(event) => {
-                    event.stopPropagation();
-                    setSelectedEdgeKey(`${entry.scope}:${entry.edge.id}`);
-                  }}
-                />
-              );
-            })}
-          </svg>
-          {visibleNodes.map((node) => {
-            const isEditing = editingNodeId === node.id;
-            return (
-              <div
-                key={node.id}
-                className={`canvas-node ${selectedNodeId === node.id ? "selected" : ""} ${connectFromId === node.id ? "connect-source" : ""} ${isEditing ? "editing" : ""}`}
-                style={{ left: node.position.x, top: node.position.y, width: node.size.w, height: node.size.h }}
-                onPointerDown={(event) => startDrag(event, node)}
-                onClick={(event) => {
-                  event.stopPropagation();
-                  handleNodeClick(node);
-                }}
-                onDoubleClick={() => setEditingNodeId(node.id)}
-              >
-                <div className="node-header">
-                  <span className="node-type">{node.type}</span>
-                  <span className="node-status">{node.status}</span>
-                </div>
-                {isEditing ? (
-                  <div
-                    className="node-inline-edit"
-                    onBlur={(event) => {
-                      if (event.currentTarget.contains(event.relatedTarget)) return;
-                      setEditingNodeId(null);
-                    }}
-                  >
-                    <input
-                      className="node-edit-input"
-                      value={node.label}
-                      onChange={(e) => updateNode(node.id, { label: e.target.value })}
-                      onKeyDown={(e) => {
-                        if (e.key === "Enter") {
-                          e.preventDefault();
-                          setEditingNodeId(null);
-                        }
-                      }}
-                      autoFocus
-                    />
-                    <textarea
-                      className="node-edit-textarea"
-                      value={node.summary}
-                      onChange={(e) => updateNode(node.id, { summary: e.target.value })}
-                      rows={3}
-                    />
-                    <div className="node-inline-actions">
-                      <button className="btn small" onClick={() => setEditingNodeId(null)}>Done</button>
-                      <button className="btn small ghost" onClick={() => deleteNode(node.id)}>Delete</button>
-                    </div>
-                  </div>
-                ) : (
-                  <>
-                    <strong>{node.label}</strong>
-                    <p>{node.summary}</p>
-                    <div className="node-actions">
-                      <button className="node-chip" onClick={() => setEditingNodeId(node.id)}>Edit</button>
-                      <button className="node-chip" onClick={() => setNodeDetailsId(node.id)}>Details</button>
-                    </div>
-                  </>
-                )}
-              </div>
-            );
-          })}
-        </div>
+          onPaneClick={handlePaneClick}
+          onNodeClick={handleNodeClickEvent}
+          onNodeDoubleClick={handleNodeDoubleClick}
+          onNodeDragStop={handleNodeDragStop}
+          onEdgeClick={handleEdgeClick}
+          nodesDraggable={!connectMode.active}
+          nodesConnectable={false}
+          defaultViewport={{ x: 120, y: 120, zoom: 1 }}
+        />
       </div>
 
       {showSettings ? (

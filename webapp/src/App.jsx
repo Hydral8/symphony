@@ -6,6 +6,7 @@ import {
   Routes,
   useLocation,
 } from "react-router-dom";
+import CanvasPlannerView from "./views/CanvasPlannerView";
 
 const API_BASE = import.meta.env.VITE_API_BASE || "";
 const RUNS_API_PREFIX = `${API_BASE}/api/v1`;
@@ -18,70 +19,6 @@ const TASK_STATES = [
   "paused",
   "stopped",
 ];
-const LOCAL_STORAGE_KEY = "symphony.canvasPlan.v1.draft";
-
-const LAYER_KINDS = [
-  "vision",
-  "module",
-  "uxui",
-  "backend",
-  "data",
-  "infra",
-  "task",
-];
-const POVS = ["product", "design", "engineering", "ops"];
-const NODE_TYPES = [
-  "vision",
-  "goal",
-  "module",
-  "component",
-  "screen",
-  "ux_flow",
-  "api",
-  "db_model",
-  "workflow",
-  "task",
-  "note",
-];
-const NODE_STATUSES = ["draft", "validated", "approved", "deprecated"];
-const NODE_PRIORITIES = ["low", "medium", "high", "critical"];
-const EDGE_RELATIONS = [
-  "depends_on",
-  "implements",
-  "informs",
-  "blocks",
-  "contains",
-  "uses_api",
-  "reads_from",
-  "writes_to",
-  "tests",
-];
-
-const UUID_RE =
-  /^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-5][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}$/;
-const NODE_ID_RE = /^node_[a-zA-Z0-9_-]+$/;
-const EDGE_ID_RE = /^edge_[a-zA-Z0-9_-]+$/;
-const LAYER_ID_RE = /^layer_[a-zA-Z0-9_-]+$/;
-
-function nowIso() {
-  return new Date().toISOString();
-}
-
-function safeUUID() {
-  if (typeof crypto !== "undefined" && crypto.randomUUID)
-    return crypto.randomUUID();
-  const bytes = Array.from({ length: 16 }, () =>
-    Math.floor(Math.random() * 256),
-  );
-  bytes[6] = (bytes[6] & 0x0f) | 0x40;
-  bytes[8] = (bytes[8] & 0x3f) | 0x80;
-  const hex = bytes.map((b) => b.toString(16).padStart(2, "0")).join("");
-  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
-}
-
-function randomId(prefix) {
-  return `${prefix}_${Math.random().toString(36).slice(2, 10)}`;
-}
 
 function parseStrategies(raw) {
   return String(raw || "")
@@ -1142,7 +1079,11 @@ function CanvasPlannerView() {
       {/* Floating Right Dock (Inspector) */}
       <aside
         className="glass-panel layer-dock animate-fade-in"
-        style={{ left: "auto", right: 24, top: "calc(var(--header-height) + 60px)" }}
+        style={{
+          left: "auto",
+          right: 24,
+          top: "calc(var(--header-height) + 60px)",
+        }}
       >
         {selectedNode ? (
           <div className="flex-col" style={{ gap: 12 }}>
@@ -2704,17 +2645,13 @@ export default function App() {
           <NavLink
             end
             to="/"
-            className={({ isActive }) =>
-              `nav-link ${isActive ? "active" : ""}`
-            }
+            className={({ isActive }) => `nav-link ${isActive ? "active" : ""}`}
           >
             Canvas
           </NavLink>
           <NavLink
             to="/dashboard"
-            className={({ isActive }) =>
-              `nav-link ${isActive ? "active" : ""}`
-            }
+            className={({ isActive }) => `nav-link ${isActive ? "active" : ""}`}
           >
             Dashboard
           </NavLink>
