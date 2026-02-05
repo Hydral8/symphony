@@ -1,12 +1,4 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
-import {
-  NavLink,
-  Navigate,
-  Route,
-  Routes,
-  useLocation,
-} from "react-router-dom";
-import CanvasPlannerView from "./views/CanvasPlannerView";
 
 const API_BASE = import.meta.env.VITE_API_BASE || "";
 const RUNS_API_PREFIX = `${API_BASE}/api/v1`;
@@ -3060,13 +3052,10 @@ function ParallelWorldsDashboardView() {
 }
 
 export default function App() {
-  const location = useLocation();
-  const isCanvas = location.pathname === "/" || location.pathname === "/canvas";
-
   useEffect(() => {
-    document.body.classList.toggle("canvas-active", isCanvas);
+    document.body.classList.remove("canvas-active");
     return () => document.body.classList.remove("canvas-active");
-  }, [isCanvas]);
+  }, []);
 
   return (
     <div className="app-root">
@@ -3079,27 +3068,10 @@ export default function App() {
           </div>
         </div>
         <nav className="nav-links">
-          <NavLink
-            end
-            to="/"
-            className={({ isActive }) => `nav-link ${isActive ? "active" : ""}`}
-          >
-            Canvas
-          </NavLink>
-          <NavLink
-            to="/dashboard"
-            className={({ isActive }) => `nav-link ${isActive ? "active" : ""}`}
-          >
-            Dashboard
-          </NavLink>
+          <span className="nav-link active">Dashboard</span>
         </nav>
       </header>
-      <Routes>
-        <Route path="/" element={<CanvasPlannerView />} />
-        <Route path="/canvas" element={<Navigate to="/" replace />} />
-        <Route path="/dashboard" element={<ParallelWorldsDashboardView />} />
-        <Route path="*" element={<Navigate to="/" replace />} />
-      </Routes>
+      <ParallelWorldsDashboardView />
     </div>
   );
 }
