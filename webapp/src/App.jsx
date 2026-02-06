@@ -1,4 +1,29 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
+import {
+  NavLink,
+  Navigate,
+  Route,
+  Routes,
+  useLocation,
+} from "react-router-dom";
+import {
+  EDGE_RELATIONS,
+  LAYER_KINDS,
+  LOCAL_STORAGE_KEY,
+  NODE_PRIORITIES,
+  NODE_STATUSES,
+  NODE_TYPES,
+  POVS,
+} from "./lib/constants";
+import {
+  EDGE_ID_RE,
+  LAYER_ID_RE,
+  NODE_ID_RE,
+  UUID_RE,
+  randomId,
+  safeUUID,
+} from "./lib/ids";
+import { nowIso } from "./lib/plan";
 
 const API_BASE = import.meta.env.VITE_API_BASE || "";
 const RUNS_API_PREFIX = `${API_BASE}/api/v1`;
@@ -1445,6 +1470,9 @@ function ParallelWorldsDashboardView() {
   const [runProgressRefreshing, setRunProgressRefreshing] = useState(false);
   const [runProgressError, setRunProgressError] = useState("");
   const [eventStreamStatus, setEventStreamStatus] = useState("idle");
+  const [compareWorldIds, setCompareWorldIds] = useState([]);
+  const [renderViewOpen, setRenderViewOpen] = useState(false);
+  const [renderViewLogs, setRenderViewLogs] = useState({});
   const [selectedTaskId, setSelectedTaskId] = useState("");
   const [drawerTab, setDrawerTab] = useState("logs");
   const [taskArtifactsById, setTaskArtifactsById] = useState({});
@@ -1662,6 +1690,34 @@ function ParallelWorldsDashboardView() {
   const branchpoints = dashboard?.branchpoints || [];
   const branchpointWorldMap = dashboard?.branchpoint_worlds || {};
   const branchpoint = dashboard?.branchpoint || null;
+  const dagRows = useMemo(() => {
+    const rows = (Array.isArray(worldRows) ? worldRows : [])
+      .map((row) => {
+        const world = row?.world || {};
+        const live = row?.live || {};
+        return {
+          id: String(world.id || "").trim(),
+          index: Number.isInteger(world.index) ? world.index : 10_000,
+          name: String(world.name || "world"),
+          branch: String(world.branch || ""),
+          status: String(world.status || "ready"),
+          head: String(live.head || "n/a"),
+          commits:
+            live.ahead_commits === null || live.ahead_commits === undefined
+              ? "n/a"
+              : String(live.ahead_commits),
+          dirty:
+            live.dirty_files === null || live.dirty_files === undefined
+              ? "n/a"
+              : String(live.dirty_files),
+        };
+      })
+      .sort((a, b) => {
+        if (a.index !== b.index) return a.index - b.index;
+        return a.name.localeCompare(b.name);
+      });
+    return rows;
+  }, [worldRows]);
 
   const branchpointLabel = useMemo(() => {
     if (!branchpoint) return "none";
@@ -3052,10 +3108,13 @@ function ParallelWorldsDashboardView() {
 }
 
 export default function App() {
+  const location = useLocation();
+  const isCanvas = location.pathname === "/" || location.pathname === "/canvas";
+
   useEffect(() => {
-    document.body.classList.remove("canvas-active");
+    document.body.classList.toggle("canvas-active", isCanvas);
     return () => document.body.classList.remove("canvas-active");
-  }, []);
+  }, [isCanvas]);
 
   return (
     <div className="app-root">
@@ -3068,10 +3127,27 @@ export default function App() {
           </div>
         </div>
         <nav className="nav-links">
-          <span className="nav-link active">Dashboard</span>
+          <NavLink
+            end
+            to="/"
+            className={({ isActive }) => `nav-link ${isActive ? "active" : ""}`}
+          >
+            Canvas
+          </NavLink>
+          <NavLink
+            to="/dashboard"
+            className={({ isActive }) => `nav-link ${isActive ? "active" : ""}`}
+          >
+            Dashboard
+          </NavLink>
         </nav>
       </header>
-      <ParallelWorldsDashboardView />
+      <Routes>
+        <Route path="/" element={<CanvasPlannerView />} />
+        <Route path="/canvas" element={<Navigate to="/" replace />} />
+        <Route path="/dashboard" element={<ParallelWorldsDashboardView />} />
+        <Route path="*" element={<Navigate to="/" replace />} />
+      </Routes>
     </div>
   );
 }

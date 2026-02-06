@@ -4,7 +4,7 @@ import selectors
 import subprocess
 import sys
 import time
-from typing import Any, Dict, List, Set, Tuple
+from typing import Any, Dict, List, Optional, Set, Tuple
 
 from .common import die, git, now_utc
 from .render_helper import ensure_render_helper
@@ -448,7 +448,14 @@ def run_codex_world(
     return payload
 
 
-def run_world(world: Dict[str, Any], branchpoint: Dict[str, Any], runner_cmd: str, timeout_sec: int, skip_runner: bool) -> Dict[str, Any]:
+def run_world(
+    world: Dict[str, Any],
+    branchpoint: Dict[str, Any],
+    runner_cmd: str,
+    timeout_sec: int,
+    skip_runner: bool,
+    repo: Optional[str] = None,
+) -> Dict[str, Any]:
     ensure_world_exists(world["worktree"])
     world_meta_dir = os.path.join(world["worktree"], ".parallel_worlds")
     os.makedirs(world_meta_dir, exist_ok=True)
