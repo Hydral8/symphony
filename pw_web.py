@@ -25,6 +25,8 @@ from urllib.parse import parse_qs, urlencode, urlparse
 
 import pw
 from parallel_worlds.common import branch_exists, git
+from parallel_worlds import config as pw_config
+from parallel_worlds import plan_generator
 
 
 _ACTION_LOCK = threading.RLock()
@@ -1042,6 +1044,57 @@ class ParallelWorldsHandler(BaseHTTPRequestHandler):
         repo = self._repo()
         cfg = self._cfg()
 
+        if parsed.path == "/api/v1/plans/generate":
+            try:
+                cfg_payload = pw_config.load_config(cfg)
+            except Exception as exc:
+                self._json(400, {"ok": False, "error": f"config error: {exc}"})
+                return
+
+            codex_cfg = cfg_payload.get("codex", {})
+            if not bool(codex_cfg.get("enabled", False)):
+                self._json(400, {"ok": False, "error": "codex is disabled in config"})
+                return
+            command = str(codex_cfg.get("command", "")).strip()
+            if not command:
+                self._json(400, {"ok": False, "error": "codex.command is not configured"})
+                return
+
+            try:
+                result = plan_generator.run_codex_plan_generation(repo, cfg_payload)
+            except Exception as exc:
+                self._json(500, {"ok": False, "error": str(exc)})
+                return
+
+            plan, err = plan_generator.extract_json(result.get("stdout", ""))
+            log_path = result.get("log_path")
+            rel_log = pw.relative_to_repo(log_path, repo) if log_path else None
+            if err:
+                self._json(
+                    400,
+                    {
+                        "ok": False,
+                        "error": f"unable to parse JSON: {err}",
+                        "log_path": rel_log,
+                    },
+                )
+                return
+
+            validation_error = plan_generator.validate_minimal_plan(plan)
+            if validation_error:
+                self._json(
+                    400,
+                    {
+                        "ok": False,
+                        "error": f"invalid plan: {validation_error}",
+                        "log_path": rel_log,
+                    },
+                )
+                return
+
+            self._json(200, {"ok": True, "plan": plan, "log_path": rel_log})
+            return
+
         if not parsed.path.startswith("/api/action/"):
             self._json(404, {"ok": False, "error": "not found"})
             return
@@ -1439,6 +1492,70 @@ class ParallelWorldsHandler(BaseHTTPRequestHandler):
                     return {"ok": ok, "output": output, "latest_branchpoint": pw.get_latest_branchpoint(repo)}
 
                 self._start_async_action("autopilot", _autopilot_job)
+                return
+
+            if parsed.path == "/api/dashboard":
+                # Handle dashboard execution actions (aliases to autopilot/kickoff)
+                prompt = str(body.get("prompt", "")).strip() or str(body.get("intent", "")).strip()
+                if not prompt:
+                    self._json(400, {"ok": False, "error": "prompt is required"})
+                    return
+                try:
+                    count = _parse_optional_int(body.get("count"), "count")
+                    max_count = _parse_optional_int(body.get("max_count"), "max_count")
+                except ValueError as exc:
+                    self._json(400, {"ok": False, "error": str(exc)})
+                    return
+                from_ref = _parse_optional_text(body.get("from_ref"))
+                run_after_kickoff = bool(body.get("run", True))
+                play_after_run = bool(body.get("play", False))
+                skip_runner = bool(body.get("skip_runner", False))
+                skip_codex = bool(body.get("skip_codex", False))
+                render_command = str(body.get("render_command", "")).strip() or None
+                timeout_raw = body.get("timeout")
+                timeout = int(timeout_raw) if timeout_raw not in (None, "") else None
+                preview_raw = body.get("preview_lines")
+                preview = int(preview_raw) if preview_raw not in (None, "") else None
+                strategies = body.get("strategies")
+                cli_strategies = None
+                if isinstance(strategies, list):
+                    cli_strategies = [str(x).strip() for x in strategies if str(x).strip()]
+                try:
+                    resolved_count, count_note = _resolve_world_count(
+                        repo=repo,
+                        config_path=cfg,
+                        intent=prompt,
+                        count=count,
+                        max_count=max_count,
+                        cli_strategies=cli_strategies,
+                    )
+                except ValueError as exc:
+                    self._json(400, {"ok": False, "error": str(exc)})
+                    return
+
+                def _dashboard_job(job_id: str) -> Dict[str, Any]:
+                    ok, output, _ = _run_action(
+                        pw.autopilot_worlds,
+                        config_path=cfg,
+                        prompt=prompt,
+                        count=resolved_count,
+                        from_ref=from_ref,
+                        cli_strategies=cli_strategies,
+                        run_after_kickoff=run_after_kickoff,
+                        play_after_run=play_after_run,
+                        skip_runner=skip_runner,
+                        skip_codex=skip_codex,
+                        render_command_override=render_command,
+                        timeout_override=timeout,
+                        preview_lines_override=preview,
+                        cwd=repo,
+                        log_callback=lambda chunk: _append_action_job_log(job_id, chunk),
+                    )
+                    if count_note:
+                        output = f"{count_note}\n{output}" if output else count_note
+                    return {"ok": ok, "output": output, "latest_branchpoint": pw.get_latest_branchpoint(repo)}
+
+                self._start_async_action("autopilot", _dashboard_job)
                 return
 
             self._json(404, {"ok": False, "error": f"unknown action: {action}"})

@@ -1,12 +1,22 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import {
+  Background,
+  Controls,
+  Handle,
+  MarkerType,
+  Position,
+  ReactFlow,
+} from "@xyflow/react";
+import "@xyflow/react/dist/style.css";
+import {
   NavLink,
   Navigate,
   Route,
   Routes,
+  useNavigate,
   useLocation,
 } from "react-router-dom";
-import CanvasPlannerView from "./views/CanvasPlannerView";
+import { postJson } from "./lib/api";
 
 const API_BASE = import.meta.env.VITE_API_BASE || "";
 const RUNS_API_PREFIX = `${API_BASE}/api/v1`;
@@ -19,6 +29,70 @@ const TASK_STATES = [
   "paused",
   "stopped",
 ];
+const LOCAL_STORAGE_KEY = "symphony.canvasPlan.v1.draft";
+
+const LAYER_KINDS = [
+  "vision",
+  "module",
+  "uxui",
+  "backend",
+  "data",
+  "infra",
+  "task",
+];
+const POVS = ["product", "design", "engineering", "ops"];
+const NODE_TYPES = [
+  "vision",
+  "goal",
+  "module",
+  "component",
+  "screen",
+  "ux_flow",
+  "api",
+  "db_model",
+  "workflow",
+  "task",
+  "note",
+];
+const NODE_STATUSES = ["draft", "validated", "approved", "deprecated"];
+const NODE_PRIORITIES = ["low", "medium", "high", "critical"];
+const EDGE_RELATIONS = [
+  "depends_on",
+  "implements",
+  "informs",
+  "blocks",
+  "contains",
+  "uses_api",
+  "reads_from",
+  "writes_to",
+  "tests",
+];
+
+const UUID_RE =
+  /^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-5][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}$/;
+const NODE_ID_RE = /^node_[a-zA-Z0-9_-]+$/;
+const EDGE_ID_RE = /^edge_[a-zA-Z0-9_-]+$/;
+const LAYER_ID_RE = /^layer_[a-zA-Z0-9_-]+$/;
+
+function nowIso() {
+  return new Date().toISOString();
+}
+
+function safeUUID() {
+  if (typeof crypto !== "undefined" && crypto.randomUUID)
+    return crypto.randomUUID();
+  const bytes = Array.from({ length: 16 }, () =>
+    Math.floor(Math.random() * 256),
+  );
+  bytes[6] = (bytes[6] & 0x0f) | 0x40;
+  bytes[8] = (bytes[8] & 0x3f) | 0x80;
+  const hex = bytes.map((b) => b.toString(16).padStart(2, "0")).join("");
+  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
+}
+
+function randomId(prefix) {
+  return `${prefix}_${Math.random().toString(36).slice(2, 10)}`;
+}
 
 function parseStrategies(raw) {
   return String(raw || "")
@@ -187,19 +261,6 @@ function statusCountsFromNodes(nodes) {
     counts[key] = (counts[key] || 0) + 1;
   }
   return counts;
-}
-
-function compareCreatedAsc(a, b) {
-  const leftTs = Date.parse(String(a?.createdAt || ""));
-  const rightTs = Date.parse(String(b?.createdAt || ""));
-  const leftOk = Number.isFinite(leftTs);
-  const rightOk = Number.isFinite(rightTs);
-  if (leftOk && rightOk && leftTs !== rightTs) {
-    return leftTs - rightTs;
-  }
-  if (leftOk && !rightOk) return -1;
-  if (!leftOk && rightOk) return 1;
-  return String(a?.id || "").localeCompare(String(b?.id || ""));
 }
 
 async function readJson(url, options) {
@@ -406,15 +467,166 @@ function validatePlan(plan) {
   return errors;
 }
 
-// Helper for Bezier Curves
-function getEdgePath(x1, y1, x2, y2) {
-  const dist = Math.sqrt(Math.pow(x2 - x1, 2) + Math.pow(y2 - y1, 2));
-  const curvature = Math.max(dist * 0.4, 50);
-  // Using horizontal handles for L-to-R flow logic, but adaptable
-  return `M ${x1} ${y1} C ${x1 + curvature} ${y1}, ${x2 - curvature} ${y2}, ${x2} ${y2}`;
+function buildExecutionPrompt(plan) {
+  const canvas = plan && typeof plan === "object" ? plan : {};
+  const metadata =
+    canvas.metadata && typeof canvas.metadata === "object"
+      ? canvas.metadata
+      : {};
+  const name = String(metadata.name || "Untitled Plan").trim();
+  const version = Number.isInteger(canvas.version) ? canvas.version : 1;
+  const lines = [];
+
+  lines.push(`Plan: ${name} (v${version})`);
+  if (metadata.vision) lines.push(`Vision: ${String(metadata.vision).trim()}`);
+
+  const goals = Array.isArray(metadata.goals)
+    ? metadata.goals.map((goal) => String(goal).trim()).filter(Boolean)
+    : [];
+  if (goals.length) {
+    lines.push("Goals:");
+    goals.forEach((goal) => lines.push(`- ${goal}`));
+  }
+
+  if (metadata.default_target_branch) {
+    lines.push(
+      `Target branch: ${String(metadata.default_target_branch).trim()}`,
+    );
+  }
+
+  const constraints =
+    metadata.constraints && typeof metadata.constraints === "object"
+      ? metadata.constraints
+      : null;
+  if (constraints) {
+    const techStack = Array.isArray(constraints.tech_stack)
+      ? constraints.tech_stack
+          .map((item) => String(item).trim())
+          .filter(Boolean)
+      : [];
+    const nonFunctional = Array.isArray(constraints.non_functional_requirements)
+      ? constraints.non_functional_requirements
+          .map((item) => String(item).trim())
+          .filter(Boolean)
+      : [];
+    if (techStack.length) lines.push(`Tech stack: ${techStack.join(", ")}`);
+    if (nonFunctional.length) lines.push(`NFRs: ${nonFunctional.join(", ")}`);
+  }
+
+  const layers = Array.isArray(canvas.layers) ? canvas.layers : [];
+  const nodeLabels = new Map();
+
+  if (layers.length) {
+    lines.push("");
+    lines.push("Layers & nodes:");
+    layers.forEach((layer) => {
+      const layerName = String(layer?.name || "Unnamed layer").trim();
+      const layerKind = String(layer?.kind || "unknown").trim();
+      const layerPov = String(layer?.pov || "unknown").trim();
+      lines.push(`Layer: ${layerName} (${layerKind}/${layerPov})`);
+      const nodes = Array.isArray(layer?.nodes) ? layer.nodes : [];
+      nodes.forEach((node) => {
+        const nodeId = String(node?.id || "").trim();
+        const label = String(node?.label || nodeId || "Untitled").trim();
+        const nodeType = String(node?.type || "note").trim();
+        nodeLabels.set(nodeId, label);
+        lines.push(`- ${label} [${nodeType}]`);
+        const summary = String(node?.summary || "").trim();
+        if (summary) lines.push(`  Summary: ${summary}`);
+        const acceptance = Array.isArray(node?.acceptance_criteria)
+          ? node.acceptance_criteria
+              .map((item) => String(item).trim())
+              .filter(Boolean)
+          : [];
+        if (acceptance.length) {
+          lines.push(`  Acceptance: ${acceptance.join("; ")}`);
+        }
+      });
+    });
+  }
+
+  const edges = [];
+  layers.forEach((layer) => {
+    if (Array.isArray(layer?.edges)) edges.push(...layer.edges);
+  });
+  if (Array.isArray(canvas.cross_layer_edges)) {
+    edges.push(...canvas.cross_layer_edges);
+  }
+  if (edges.length) {
+    lines.push("");
+    lines.push("Dependencies:");
+    edges.forEach((edge) => {
+      const sourceId = String(edge?.source || "").trim();
+      const targetId = String(edge?.target || "").trim();
+      const sourceLabel = nodeLabels.get(sourceId) || sourceId || "unknown";
+      const targetLabel = nodeLabels.get(targetId) || targetId || "unknown";
+      const relation = String(edge?.relation || "relates_to").trim();
+      lines.push(`- ${sourceLabel} -> ${targetLabel} (${relation})`);
+      const notes = String(edge?.notes || "").trim();
+      if (notes) lines.push(`  Notes: ${notes}`);
+    });
+  }
+
+  const prefs =
+    canvas.orchestrator_preferences &&
+    typeof canvas.orchestrator_preferences === "object"
+      ? canvas.orchestrator_preferences
+      : null;
+  if (prefs) {
+    const qualityGates = Array.isArray(prefs.quality_gates)
+      ? prefs.quality_gates.map((item) => String(item).trim()).filter(Boolean)
+      : [];
+    lines.push("");
+    lines.push("Execution preferences:");
+    if (prefs.max_parallel_agents != null)
+      lines.push(`- max_parallel_agents: ${prefs.max_parallel_agents}`);
+    if (prefs.retry_limit != null)
+      lines.push(`- retry_limit: ${prefs.retry_limit}`);
+    if (qualityGates.length)
+      lines.push(`- quality_gates: ${qualityGates.join(", ")}`);
+  }
+
+  lines.push("");
+  lines.push(
+    "Execute this plan and implement tasks in parallel where dependencies allow.",
+  );
+  return lines.join("\n");
+}
+
+function CanvasNode({ data, selected }) {
+  const node = data.node;
+  return (
+    <div
+      className={`canvas-node ${selected ? "selected" : ""} ${data.connectSource ? "connect-source" : ""}`}
+    >
+      <Handle
+        type="target"
+        position={Position.Left}
+        className="canvas-handle"
+      />
+      <div className="node-header">
+        <span className="node-label">{node.type}</span>
+        <span
+          className={`badge ${node.status === "completed" ? "success" : "pending"}`}
+        >
+          {node.status}
+        </span>
+      </div>
+      <div className="node-body">
+        <div className="node-title">{node.label}</div>
+        <div className="node-summary">{node.summary}</div>
+      </div>
+      <Handle
+        type="source"
+        position={Position.Right}
+        className="canvas-handle"
+      />
+    </div>
+  );
 }
 
 function CanvasPlannerView() {
+  const navigate = useNavigate();
   const [plan, setPlan] = useState(() => loadLocalDraft() || defaultPlan());
   const [selectedLayerId, setSelectedLayerId] = useState("all");
   const [selectedPov, setSelectedPov] = useState("all");
@@ -428,6 +640,8 @@ function CanvasPlannerView() {
   });
   const [connectFromId, setConnectFromId] = useState(null);
   const [message, setMessage] = useState("");
+  const [isGenerating, setIsGenerating] = useState(false);
+  const [isExecuting, setIsExecuting] = useState(false);
   const [addLayerForm, setAddLayerForm] = useState({
     name: "",
     kind: "module",
@@ -442,41 +656,6 @@ function CanvasPlannerView() {
     status: "draft",
     priority: "medium",
   });
-
-  const surfaceRef = useRef(null);
-  const [dragState, setDragState] = useState(null);
-  const [viewport, setViewport] = useState({ x: 0, y: 0, zoom: 1 });
-  const [isPanning, setIsPanning] = useState(false);
-
-  // Pan & Zoom Handlers
-  function handleWheel(e) {
-    if (e.ctrlKey || e.metaKey) {
-      e.preventDefault();
-      const zoomSensitivity = 0.001;
-      const delta = -e.deltaY * zoomSensitivity;
-      const newZoom = Math.min(Math.max(viewport.zoom + delta, 0.1), 5);
-      setViewport((prev) => ({ ...prev, zoom: newZoom }));
-    } else {
-      setViewport((prev) => ({
-        ...prev,
-        x: prev.x - e.deltaX,
-        y: prev.y - e.deltaY,
-      }));
-    }
-  }
-
-  function handleCanvasPointerDown(e) {
-    if (e.button === 1 || e.button === 0) {
-      setIsPanning(true);
-      setDragState({
-        mode: "pan",
-        startX: e.clientX,
-        startY: e.clientY,
-        viewX: viewport.x,
-        viewY: viewport.y,
-      });
-    }
-  }
 
   useEffect(() => {
     try {
@@ -505,55 +684,6 @@ function CanvasPlannerView() {
           );
     if (!found) setSelectedEdgeKey(null);
   }, [plan, selectedEdgeKey]);
-
-  useEffect(() => {
-    if (!dragState) return;
-    function onPointerMove(event) {
-      if (dragState.mode === "pan") {
-        const dx = event.clientX - dragState.startX;
-        const dy = event.clientY - dragState.startY;
-        setViewport({
-          ...viewport,
-          x: dragState.viewX + dx,
-          y: dragState.viewY + dy,
-        });
-        return;
-      }
-
-      if (!surfaceRef.current) return;
-      const worldX = (event.clientX - viewport.x) / viewport.zoom;
-      const worldY = (event.clientY - viewport.y) / viewport.zoom;
-      const nodeX = worldX - dragState.localX;
-      const nodeY = worldY - dragState.localY;
-
-      setPlan((prev) => ({
-        ...prev,
-        created_at: prev.created_at || nowIso(),
-        updated_at: nowIso(),
-        layers: prev.layers.map((layer) => ({
-          ...layer,
-          nodes: layer.nodes.map((node) =>
-            node.id === dragState.nodeId
-              ? {
-                  ...node,
-                  position: { x: Math.round(nodeX), y: Math.round(nodeY) },
-                }
-              : node,
-          ),
-        })),
-      }));
-    }
-    function onPointerUp() {
-      setDragState(null);
-      setIsPanning(false);
-    }
-    window.addEventListener("pointermove", onPointerMove);
-    window.addEventListener("pointerup", onPointerUp);
-    return () => {
-      window.removeEventListener("pointermove", onPointerMove);
-      window.removeEventListener("pointerup", onPointerUp);
-    };
-  }, [dragState, viewport]);
 
   const nodeMap = useMemo(() => {
     const map = new Map();
@@ -628,6 +758,15 @@ function CanvasPlannerView() {
 
   const validationErrors = useMemo(() => validatePlan(plan), [plan]);
   const exportJson = useMemo(() => JSON.stringify(plan, null, 2), [plan]);
+  const totalNodes = useMemo(
+    () =>
+      plan.layers.reduce(
+        (sum, layer) => sum + (layer.nodes ? layer.nodes.length : 0),
+        0,
+      ),
+    [plan.layers],
+  );
+  const planReady = validationErrors.length === 0 && totalNodes > 0;
 
   function updatePlan(mutator) {
     setPlan((prev) => {
@@ -750,18 +889,6 @@ function CanvasPlannerView() {
     setSelectedNodeId(null);
     setSelectedEdgeKey(null);
     setMessage("Node and connected edges removed.");
-  }
-
-  function startDrag(event, node) {
-    if (connectMode.active) return;
-    event.stopPropagation();
-    const mouseWorldX = (event.clientX - viewport.x) / viewport.zoom;
-    const mouseWorldY = (event.clientY - viewport.y) / viewport.zoom;
-    setDragState({
-      nodeId: node.id,
-      localX: mouseWorldX - node.position.x,
-      localY: mouseWorldY - node.position.y,
-    });
   }
 
   function handleNodeClick(node) {
@@ -909,6 +1036,69 @@ function CanvasPlannerView() {
       .catch(() => setMessage("Unable to copy JSON."));
   }
 
+  async function generateFromCodex() {
+    if (isGenerating) return;
+    setIsGenerating(true);
+    try {
+      const payload = await postJson(`${API_BASE}/api/v1/plans/generate`, {});
+      if (!payload || !payload.plan) throw new Error("No plan returned");
+      setPlan(payload.plan);
+      setSelectedLayerId("all");
+      setSelectedPov("all");
+      setSelectedNodeId(null);
+      setSelectedEdgeKey(null);
+      setConnectFromId(null);
+      setMessage("Generated plan via Codex CLI.");
+    } catch (err) {
+      const messageText =
+        err instanceof Error ? err.message : String(err || "Unknown error");
+      const logHint =
+        err && err.payload && err.payload.log_path
+          ? ` (log: ${err.payload.log_path})`
+          : "";
+      setMessage(`Codex generation failed: ${messageText}${logHint}`);
+    } finally {
+      setIsGenerating(false);
+    }
+  }
+
+  async function executePlan() {
+    if (isExecuting) return;
+    if (validationErrors.length > 0) {
+      setMessage("Resolve validation errors before executing the plan.");
+      return;
+    }
+    if (totalNodes === 0) {
+      setMessage("Add at least one node before executing the plan.");
+      return;
+    }
+    setIsExecuting(true);
+    try {
+      const prompt = buildExecutionPrompt(plan);
+      const payload = await postJson(`${API_BASE}/api/action/autopilot`, {
+        prompt,
+        run: true,
+        play: false,
+        skip_codex: false,
+        skip_runner: false,
+      });
+      const jobId = payload && payload.job_id ? String(payload.job_id) : "";
+      const jobLabel = jobId ? ` (job ${jobId})` : "";
+      setMessage(`Execution started${jobLabel}. Check Dashboard for progress.`);
+      if (jobId) {
+        navigate(`/dashboard?job=${encodeURIComponent(jobId)}`);
+      } else {
+        navigate("/dashboard");
+      }
+    } catch (err) {
+      const messageText =
+        err instanceof Error ? err.message : String(err || "Unknown error");
+      setMessage(`Plan execution failed: ${messageText}`);
+    } finally {
+      setIsExecuting(false);
+    }
+  }
+
   function downloadExport() {
     const name = (plan.metadata?.name || "plan")
       .toLowerCase()
@@ -940,6 +1130,16 @@ function CanvasPlannerView() {
           </button>
           <button className="btn ghost small" onClick={clearDraft}>
             Clear
+          </button>
+        </div>
+
+        <div className="toolbar-group">
+          <button
+            className="btn ghost small"
+            onClick={generateFromCodex}
+            disabled={isGenerating}
+          >
+            {isGenerating ? "Generating..." : "Generate (Codex CLI)"}
           </button>
         </div>
 
@@ -991,6 +1191,16 @@ function CanvasPlannerView() {
         <div className="toolbar-group">
           <button className="btn primary small" onClick={downloadExport}>
             Export JSON
+          </button>
+        </div>
+
+        <div className="toolbar-group">
+          <button
+            className="btn accent small"
+            onClick={executePlan}
+            disabled={!planReady || isExecuting}
+          >
+            {isExecuting ? "Executing..." : "Execute Plan"}
           </button>
         </div>
       </nav>
@@ -1293,107 +1503,75 @@ function CanvasPlannerView() {
       )}
 
       {/* Canvas Surface */}
-      <section
-        className="canvas-surface"
-        ref={surfaceRef}
-        onPointerDown={handleCanvasPointerDown}
-        onWheel={handleWheel}
-        style={{
-          transform: `translate(${viewport.x}px, ${viewport.y}px) scale(${viewport.zoom})`,
-          cursor: isPanning ? "grabbing" : "grab",
-        }}
-        onClick={() => setSelectedNodeId(null)}
-      >
-        <svg className="canvas-edges" style={{ overflow: "visible" }}>
-          <defs>
-            <marker
-              id="arrowhead"
-              markerWidth="10"
-              markerHeight="7"
-              refX="28"
-              refY="3.5"
-              orient="auto"
-            >
-              <polygon points="0 0, 10 3.5, 0 7" fill="var(--ink-muted)" />
-            </marker>
-            <marker
-              id="arrowhead-hover"
-              markerWidth="10"
-              markerHeight="7"
-              refX="28"
-              refY="3.5"
-              orient="auto"
-            >
-              <polygon points="0 0, 10 3.5, 0 7" fill="var(--teal-glow)" />
-            </marker>
-          </defs>
-          {visibleEdges.map((entry) => {
-            const source = nodeMap.get(entry.edge.source);
-            const target = nodeMap.get(entry.edge.target);
-            if (!source || !target) return null;
-            const x1 = source.position.x + source.size.w / 2;
-            const y1 = source.position.y + source.size.h / 2;
-            const x2 = target.position.x + target.size.w / 2;
-            const y2 = target.position.y + target.size.h / 2;
+      <section className="canvas-surface">
+        <ReactFlow
+          nodes={visibleNodes.map((node) => ({
+            id: node.id,
+            type: "canvas",
+            position: node.position,
+            data: {
+              node,
+              connectSource: connectFromId === node.id,
+            },
+            selected: selectedNodeId === node.id,
+            style: { width: node.size.w, height: node.size.h },
+          }))}
+          edges={visibleEdges.map((entry) => {
             const edgeKey = `${entry.scope}:${entry.edge.id}`;
-            const pathD = getEdgePath(x1, y1, x2, y2);
-
-            return (
-              <path
-                key={edgeKey}
-                d={pathD}
-                className={`edge-path ${entry.scope === "cross" ? "cross" : ""} ${selectedEdgeKey === edgeKey ? "selected" : ""}`}
-                markerEnd={
+            return {
+              id: edgeKey,
+              source: entry.edge.source,
+              target: entry.edge.target,
+              type: "smoothstep",
+              selected: selectedEdgeKey === edgeKey,
+              className: "edge-path",
+              markerEnd: {
+                type: MarkerType.ArrowClosed,
+                color:
                   selectedEdgeKey === edgeKey
-                    ? "url(#arrowhead-hover)"
-                    : "url(#arrowhead)"
-                }
-                onClick={(e) => {
-                  e.stopPropagation();
-                  setSelectedEdgeKey(edgeKey);
-                }}
-                style={{ fill: "none" }}
-              />
-            );
+                    ? "var(--teal-glow)"
+                    : "var(--ink-muted)",
+              },
+              style: {
+                stroke:
+                  selectedEdgeKey === edgeKey
+                    ? "var(--teal-glow)"
+                    : "var(--ink-muted)",
+                strokeWidth: selectedEdgeKey === edgeKey ? 3 : 2,
+              },
+            };
           })}
-        </svg>
-
-        {visibleNodes.map((node) => (
-          <div
-            key={node.id}
-            className={`canvas-node ${selectedNodeId === node.id ? "selected" : ""} ${connectFromId === node.id ? "connect-source" : ""}`}
-            style={{
-              left: node.position.x,
-              top: node.position.y,
-              width: node.size.w,
-              height: node.size.h,
-            }}
-            onPointerDown={(event) => startDrag(event, node)}
-            onClick={(event) => {
-              event.stopPropagation();
-              handleNodeClick(node);
-            }}
-          >
-            <div className="node-header">
-              <span className="node-label">{node.type}</span>
-              <span
-                className={`badge ${node.status === "completed" ? "success" : "pending"}`}
-              >
-                {node.status}
-              </span>
-            </div>
-            <div className="node-body">
-              <div className="node-title">{node.label}</div>
-              <div className="node-summary">{node.summary}</div>
-            </div>
-          </div>
-        ))}
+          nodeTypes={{ canvas: CanvasNode }}
+          nodesConnectable={false}
+          onNodeClick={(_, node) => handleNodeClick(node.data.node)}
+          onEdgeClick={(_, edge) => setSelectedEdgeKey(edge.id)}
+          onNodeDragStop={(_, node) =>
+            updateNode(node.id, {
+              position: {
+                x: Math.round(node.position.x),
+                y: Math.round(node.position.y),
+              },
+            })
+          }
+          onPaneClick={() => {
+            setSelectedNodeId(null);
+            setSelectedEdgeKey(null);
+          }}
+          fitView={false}
+          minZoom={0.1}
+          maxZoom={4}
+          className="canvas-flow"
+        >
+          <Background gap={24} color="rgba(255,255,255,0.08)" />
+          <Controls position="bottom-right" showInteractive={false} />
+        </ReactFlow>
       </section>
     </main>
   );
 }
 
 function ParallelWorldsDashboardView() {
+  const location = useLocation();
   const [dashboard, setDashboard] = useState(null);
   const [selectedBranchpoint, setSelectedBranchpoint] = useState("");
   const [loading, setLoading] = useState(true);
@@ -1401,6 +1579,9 @@ function ParallelWorldsDashboardView() {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const [actionOutput, setActionOutput] = useState("");
+  const [actionJobId, setActionJobId] = useState("");
+  const [actionJob, setActionJob] = useState(null);
+  const [actionJobError, setActionJobError] = useState("");
   const [artifactName, setArtifactName] = useState("report.md");
   const [artifactText, setArtifactText] = useState("");
   const [logState, setLogState] = useState({
@@ -1459,6 +1640,7 @@ function ParallelWorldsDashboardView() {
   const [steerForm, setSteerForm] = useState({ comment: "", promptPatch: "" });
 
   const eventSourceRef = useRef(null);
+  const pendingActionRef = useRef(null);
 
   async function loadDashboard(
     branchpoint = selectedBranchpoint,
@@ -1651,6 +1833,57 @@ function ParallelWorldsDashboardView() {
   }
 
   useEffect(() => {
+    const params = new URLSearchParams(location.search || "");
+    const job = params.get("job");
+    if (job) {
+      setActionJobId(job);
+      setActionJob((prev) => {
+        if (prev && prev.id === job) return prev;
+        return { id: job, status: "running", log: "", action: "autopilot" };
+      });
+      setActionJobError("");
+    }
+  }, [location.search]);
+
+  useEffect(() => {
+    if (!actionJobId) return;
+    let cancelled = false;
+    const poll = async () => {
+      try {
+        const payload = await readJson(
+          `${API_BASE}/api/action_status?job=${encodeURIComponent(actionJobId)}`,
+        );
+        if (cancelled) return;
+        setActionJob(payload);
+        setActionJobError("");
+        if (payload.status === "completed" || payload.status === "failed") {
+          const pending = pendingActionRef.current;
+          pendingActionRef.current = null;
+          if (pending) {
+            if (pending.switchToLatest && payload.result?.latest_branchpoint) {
+              setSelectedBranchpoint(payload.result.latest_branchpoint);
+              await loadDashboard(payload.result.latest_branchpoint, false);
+            } else if (pending.refresh) {
+              await loadDashboard(selectedBranchpoint, false);
+            }
+          }
+          setActionJobId("");
+        }
+      } catch (err) {
+        if (!cancelled) {
+          setActionJobError(err.message);
+        }
+      }
+    };
+    poll();
+    const timer = setInterval(poll, 2000);
+    return () => {
+      cancelled = true;
+      clearInterval(timer);
+    };
+  }, [actionJobId, selectedBranchpoint]);
+
+  useEffect(() => {
     loadDashboard("", true);
     return () => {
       closeRunEventStream();
@@ -1666,7 +1899,6 @@ function ParallelWorldsDashboardView() {
 
   const worldRows = dashboard?.world_rows || [];
   const branchpoints = dashboard?.branchpoints || [];
-  const branchpointWorldMap = dashboard?.branchpoint_worlds || {};
   const branchpoint = dashboard?.branchpoint || null;
 
   const branchpointLabel = useMemo(() => {
@@ -1738,125 +1970,6 @@ function ParallelWorldsDashboardView() {
     ? taskArtifactsById[selectedTaskId] || []
     : [];
 
-  const branchpointLineage = useMemo(() => {
-    const nodes = (Array.isArray(branchpoints) ? branchpoints : [])
-      .map((bp) => ({
-        id: String(bp?.id || "").trim(),
-        sourceRef: String(bp?.source_ref || "").trim(),
-        baseBranch: String(bp?.base_branch || "").trim() || "main",
-        status: String(bp?.status || "created").trim() || "created",
-        createdAt: String(bp?.created_at || "").trim(),
-      }))
-      .filter((bp) => bp.id);
-
-    if (nodes.length === 0) {
-      return { rows: [], total: 0 };
-    }
-
-    const byId = new Map(nodes.map((node) => [node.id, node]));
-    const worldsByBranchpoint = new Map();
-    const worldBranchOwner = new Map();
-
-    for (const node of nodes) {
-      const rawWorlds = Array.isArray(branchpointWorldMap[node.id]) ? branchpointWorldMap[node.id] : [];
-      const worlds = rawWorlds
-        .map((world) => ({
-          id: String(world?.id || "").trim(),
-          name: String(world?.name || "world").trim() || "world",
-          branch: String(world?.branch || "").trim(),
-          status: String(world?.status || "ready").trim() || "ready",
-          index: Number.isInteger(world?.index) ? world.index : null,
-        }))
-        .filter((world) => world.id);
-
-      worlds.sort((left, right) => {
-        const leftIndex = Number.isInteger(left.index) ? left.index : 10_000;
-        const rightIndex = Number.isInteger(right.index) ? right.index : 10_000;
-        if (leftIndex !== rightIndex) return leftIndex - rightIndex;
-        return String(left.name).localeCompare(String(right.name));
-      });
-
-      worldsByBranchpoint.set(node.id, worlds);
-      for (const world of worlds) {
-        if (world.branch && !worldBranchOwner.has(world.branch)) {
-          worldBranchOwner.set(world.branch, node.id);
-        }
-      }
-    }
-
-    const parentById = new Map();
-    const childrenById = new Map();
-
-    for (const node of nodes) {
-      const parentId = worldBranchOwner.get(node.sourceRef);
-      if (parentId && parentId !== node.id) {
-        parentById.set(node.id, parentId);
-        if (!childrenById.has(parentId)) {
-          childrenById.set(parentId, []);
-        }
-        childrenById.get(parentId).push(node.id);
-      }
-    }
-
-    for (const children of childrenById.values()) {
-      children.sort((leftId, rightId) => compareCreatedAsc(byId.get(leftId), byId.get(rightId)));
-    }
-
-    const sourceGroups = new Map();
-    for (const node of nodes) {
-      if (parentById.has(node.id)) continue;
-      const sourceRef = node.sourceRef || node.baseBranch || "main";
-      if (!sourceGroups.has(sourceRef)) {
-        sourceGroups.set(sourceRef, []);
-      }
-      sourceGroups.get(sourceRef).push(node.id);
-    }
-
-    for (const roots of sourceGroups.values()) {
-      roots.sort((leftId, rightId) => compareCreatedAsc(byId.get(leftId), byId.get(rightId)));
-    }
-
-    const rows = [];
-    const visited = new Set();
-
-    const walk = (nodeId, depth) => {
-      if (!nodeId || visited.has(nodeId)) return;
-      visited.add(nodeId);
-      const node = byId.get(nodeId);
-      if (!node) return;
-      rows.push({
-        type: "branchpoint",
-        key: `bp:${node.id}`,
-        depth,
-        branchpoint: node,
-        worlds: worldsByBranchpoint.get(node.id) || [],
-      });
-      const children = childrenById.get(nodeId) || [];
-      for (const childId of children) {
-        walk(childId, depth + 1);
-      }
-    };
-
-    const sortedSources = Array.from(sourceGroups.keys()).sort((left, right) => String(left).localeCompare(String(right)));
-    for (const sourceRef of sortedSources) {
-      rows.push({ type: "source", key: `source:${sourceRef}`, depth: 0, sourceRef });
-      const roots = sourceGroups.get(sourceRef) || [];
-      for (const rootId of roots) {
-        walk(rootId, 1);
-      }
-    }
-
-    const orphans = nodes.filter((node) => !visited.has(node.id)).sort(compareCreatedAsc);
-    if (orphans.length > 0) {
-      rows.push({ type: "source", key: "source:unlinked", depth: 0, sourceRef: "unlinked" });
-      for (const orphan of orphans) {
-        walk(orphan.id, 1);
-      }
-    }
-
-    return { rows, total: nodes.length };
-  }, [branchpointWorldMap, branchpoints]);
-
   async function postAction(action, payload, opts = {}) {
     const { refresh = true, switchToLatest = false } = opts;
     setBusy(true);
@@ -1868,6 +1981,22 @@ function ParallelWorldsDashboardView() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(payload || {}),
       });
+      if (result.job_id) {
+        setActionJobId(result.job_id);
+        setActionJob({
+          id: result.job_id,
+          status: result.status || "running",
+          action: result.action || action,
+          log: "",
+          result: null,
+        });
+        setActionOutput("");
+        pendingActionRef.current = { refresh, switchToLatest };
+        return;
+      }
+      setActionJob(null);
+      setActionJobId("");
+      setActionJobError("");
       setActionOutput(result.output || "Action completed.");
       if (switchToLatest && result.latest_branchpoint) {
         setSelectedBranchpoint(result.latest_branchpoint);
@@ -1939,9 +2068,19 @@ function ParallelWorldsDashboardView() {
   if (loading) {
     return (
       <main className="shell">
-        <section className="glass loading-card">
-          <h1>Parallel Worlds Dashboard</h1>
-          <p>Loading repository state...</p>
+        <section
+          className="glass-panel"
+          style={{
+            margin: "auto",
+            padding: "40px",
+            textAlign: "center",
+            maxWidth: "400px",
+          }}
+        >
+          <h1 style={{ fontSize: "1.5rem", marginBottom: "1rem" }}>
+            Parallel Worlds
+          </h1>
+          <p className="subtle">Loading repository state...</p>
         </section>
       </main>
     );
@@ -1953,9 +2092,13 @@ function ParallelWorldsDashboardView() {
         <div>
           <p className="eyebrow">Git Pathway Control</p>
           <h1>Parallel Worlds</h1>
-          <p className="subtle">
-            Branchpoint: <code>{branchpointLabel}</code>
-          </p>
+          <div
+            className="flex-center"
+            style={{ gap: 10, justifyContent: "flex-start" }}
+          >
+            <span className="subtle">Branchpoint:</span>
+            <code className="run-pill pending">{branchpointLabel}</code>
+          </div>
         </div>
         <div className="hero-actions">
           <button
@@ -1976,860 +2119,778 @@ function ParallelWorldsDashboardView() {
           </button>
         </div>
       </header>
-
-      {error ? (
-        <section className="glass notice error">
-          <strong>Error:</strong> {error}
-        </section>
-      ) : null}
-
-      {actionOutput ? (
-        <section className="glass notice">
-          <pre>{actionOutput}</pre>
-        </section>
-      ) : null}
-
-      <section className="glass progress-shell">
-        <div className="progress-head">
-          <div>
-            <p className="eyebrow">Symphony Operator View</p>
-            <h2>Run Progress</h2>
-            <p className="subtle">
-              Monitor DAG execution and steer active tasks from one panel.
-            </p>
+      <div
+        className="dashboard-scroller"
+        style={{
+          flex: 1,
+          overflowY: "auto",
+          display: "flex",
+          flexDirection: "column",
+        }}
+      >
+        {error && (
+          <div
+            className="layout"
+            style={{ flex: "0 0 auto", paddingBottom: 0 }}
+          >
+            <section className="notice error" style={{ width: "100%" }}>
+              <strong>Error:</strong> {error}
+            </section>
           </div>
-          <div className="progress-actions">
-            <input
-              value={runIdInput}
-              onChange={(e) => setRunIdInput(e.target.value)}
-              placeholder="run-id"
-              aria-label="Run ID"
-            />
-            <button
-              className="btn"
-              disabled={runProgressLoading || !runIdInput.trim()}
-              onClick={() =>
-                loadRunProgress(runIdInput.trim(), { initial: true })
-              }
-            >
-              {runProgressLoading ? "Loading..." : "Load Run"}
-            </button>
-            <button
-              className="btn ghost"
-              disabled={!activeRunId || runProgressRefreshing}
-              onClick={() => loadRunProgress(activeRunId, { initial: false })}
-            >
-              {runProgressRefreshing ? "Refreshing..." : "Refresh Run"}
-            </button>
-            {eventStreamStatus === "live" ||
-            eventStreamStatus === "connecting" ? (
-              <button className="btn ghost" onClick={closeRunEventStream}>
-                Disconnect Events
+        )}
+
+        {actionJob && (
+          <div
+            className="layout"
+            style={{ flex: "0 0 auto", paddingBottom: 0 }}
+          >
+            <section className="notice" style={{ width: "100%" }}>
+              <div
+                className="flex-between"
+                style={{ marginBottom: 8, gap: 12 }}
+              >
+                <strong>
+                  Action Job{actionJob.action ? `: ${actionJob.action}` : ""}
+                </strong>
+                <span className="subtle mono">{actionJob.id}</span>
+              </div>
+              <p className="subtle" style={{ margin: "0 0 8px" }}>
+                Status: {actionJob.status || "running"}
+              </p>
+              {actionJobError && (
+                <p className="subtle" style={{ margin: "0 0 8px" }}>
+                  Polling error: {actionJobError}
+                </p>
+              )}
+              <pre style={{ margin: 0 }}>
+                {actionJob.log || "Awaiting output..."}
+              </pre>
+            </section>
+          </div>
+        )}
+
+        {!actionJob && actionOutput && (
+          <div
+            className="layout"
+            style={{ flex: "0 0 auto", paddingBottom: 0 }}
+          >
+            <section className="notice" style={{ width: "100%" }}>
+              <pre style={{ margin: 0 }}>{actionOutput}</pre>
+            </section>
+          </div>
+        )}
+
+        <section className="glass-panel progress-shell animate-fade-in">
+          <div className="progress-head">
+            <div>
+              <p className="eyebrow">Symphony Operator View</p>
+              <h2 style={{ fontSize: "1.25rem", fontWeight: 600 }}>
+                Run Progress
+              </h2>
+              <p className="subtle">
+                Monitor DAG execution and steer active tasks.
+              </p>
+            </div>
+            <div className="progress-actions">
+              <input
+                value={runIdInput}
+                onChange={(e) => setRunIdInput(e.target.value)}
+                placeholder="run-id"
+                style={{ width: 240 }}
+              />
+              <button
+                className="btn"
+                disabled={runProgressLoading || !runIdInput.trim()}
+                onClick={() =>
+                  loadRunProgress(runIdInput.trim(), { initial: true })
+                }
+              >
+                {runProgressLoading ? "Loading..." : "Load"}
               </button>
-            ) : (
+              <button
+                className="btn ghost"
+                disabled={!activeRunId || runProgressRefreshing}
+                onClick={() => loadRunProgress(activeRunId, { initial: false })}
+              >
+                Refresh
+              </button>
+              {eventStreamStatus === "live" ||
+              eventStreamStatus === "connecting" ? (
+                <button className="btn ghost" onClick={closeRunEventStream}>
+                  Disconnect
+                </button>
+              ) : (
+                <button
+                  className="btn ghost"
+                  disabled={!activeRunId}
+                  onClick={() => connectRunEventStream(activeRunId)}
+                >
+                  Connect
+                </button>
+              )}
               <button
                 className="btn ghost"
                 disabled={!activeRunId}
-                onClick={() => connectRunEventStream(activeRunId)}
+                onClick={clearRunProgress}
               >
-                Connect Events
+                Clear
               </button>
-            )}
-            <button
-              className="btn ghost"
-              disabled={!activeRunId}
-              onClick={clearRunProgress}
-            >
-              Clear
-            </button>
+            </div>
           </div>
-        </div>
 
-        {runProgressError ? (
-          <div className="notice error progress-error">
-            <strong>Run API error:</strong> {runProgressError}
+          {runProgressError && (
+            <div className="notice error">
+              <strong>Run API error:</strong> {runProgressError}
+            </div>
+          )}
+
+          <div className="progress-kpis">
+            <article className="kpi-card">
+              <p>Run ID</p>
+              <strong style={{ fontSize: "0.9rem" }}>
+                {activeRunId || "none"}
+              </strong>
+            </article>
+            <article className="kpi-card">
+              <p>Status</p>
+              <span
+                className={`run-pill ${runStatusTone(runSummary?.status)}`}
+                style={{ fontWeight: 600 }}
+              >
+                {String(runSummary?.status || "pending")}
+              </span>
+            </article>
+            <article className="kpi-card">
+              <p>Active Agents</p>
+              <strong>{activeAgents}</strong>
+            </article>
+            <article className="kpi-card">
+              <p>Completion</p>
+              <strong>{completionPct}</strong>
+            </article>
+            <article className="kpi-card">
+              <p>Tasks</p>
+              <strong>{runDiagram.nodes.length}</strong>
+            </article>
           </div>
-        ) : null}
 
-        <div className="progress-kpis">
-          <article className="kpi-card">
-            <p>Run ID</p>
-            <strong>{activeRunId || "none"}</strong>
-          </article>
-          <article className="kpi-card">
-            <p>Status</p>
-            <strong className={`run-pill ${runStatusTone(runSummary?.status)}`}>
-              {String(runSummary?.status || "pending")}
-            </strong>
-          </article>
-          <article className="kpi-card">
-            <p>Active agents</p>
-            <strong>{activeAgents}</strong>
-          </article>
-          <article className="kpi-card">
-            <p>Completion</p>
-            <strong>{completionPct}</strong>
-          </article>
-          <article className="kpi-card">
-            <p>Total tasks</p>
-            <strong>{runDiagram.nodes.length}</strong>
-          </article>
-        </div>
+          <div className="status-counter-row">
+            {TASK_STATES.map((state) => (
+              <span key={state} className={`status-chip ${state}`}>
+                {state}: {runStatusCounts[state] || 0}
+              </span>
+            ))}
+          </div>
 
-        <div className="status-counter-row">
-          {TASK_STATES.map((state) => (
-            <span key={state} className={`status-chip ${state}`}>
-              {state}: {runStatusCounts[state] || 0}
-            </span>
-          ))}
-        </div>
+          <div className="progress-layout">
+            <section className="diagram-panel">
+              <header className="flex-between">
+                <h3 className="eyebrow" style={{ color: "var(--ink)" }}>
+                  DAG Tasks
+                </h3>
+                <span className="subtle" style={{ fontSize: "0.75rem" }}>
+                  {runDiagram.edges.length} edges
+                </span>
+              </header>
 
-        <div className="progress-layout">
-          <section className="diagram-panel">
-            <header>
-              <h3>DAG Tasks</h3>
-              <p className="subtle">
-                {runDiagram.edges.length} dependency edges
-              </p>
-            </header>
-            {runDiagram.nodes.length === 0 ? (
-              <p className="subtle">Load a run to render task nodes.</p>
-            ) : (
-              <div className="dag-grid">
-                {runDiagram.nodes.map((node) => (
-                  <button
-                    key={node.taskId}
-                    className={`dag-node ${node.status} ${selectedTaskId === node.taskId ? "selected" : ""}`}
-                    onClick={() => {
-                      setSelectedTaskId(node.taskId);
-                      setDrawerTab("logs");
-                    }}
-                  >
-                    <span className="dag-node-title">{node.title}</span>
-                    <span className={`dag-node-status ${node.status}`}>
-                      {node.status}
-                    </span>
-                    <span className="dag-node-id mono">{node.taskId}</span>
-                  </button>
-                ))}
-              </div>
-            )}
-
-            <header className="event-head">
-              <h3>Live Events</h3>
-              <p className="subtle">
-                Stream: <code>{eventStreamStatus}</code>
-              </p>
-            </header>
-            <div className="event-feed">
-              {runEvents.length === 0 ? (
-                <p className="subtle">
-                  No events yet. Connect stream or refresh run.
-                </p>
+              {!runDiagram.nodes.length ? (
+                <div
+                  className="flex-center"
+                  style={{ height: "100%", opacity: 0.5 }}
+                >
+                  <p>Load a run to view execution graph.</p>
+                </div>
               ) : (
-                runEvents.map((event) => (
-                  <article key={event.id} className="event-row">
-                    <div className="event-row-head">
-                      <strong>{event.type}</strong>
-                      <span className="subtle">{event.taskId || "run"}</span>
+                <div className="dag-grid">
+                  {runDiagram.nodes.map((node) => (
+                    <button
+                      key={node.taskId}
+                      className={`dag-node ${node.status} ${selectedTaskId === node.taskId ? "selected" : ""}`}
+                      onClick={() => {
+                        setSelectedTaskId(node.taskId);
+                        setDrawerTab("logs");
+                      }}
+                    >
+                      <span className="dag-node-title">{node.title}</span>
+                      <span className={`dag-node-status ${node.status}`}>
+                        {node.status}
+                      </span>
+                      <span className="dag-node-id mono">{node.taskId}</span>
+                    </button>
+                  ))}
+                </div>
+              )}
+
+              <header className="event-head">
+                <h3 className="eyebrow" style={{ color: "var(--ink)" }}>
+                  Live Events
+                </h3>
+                <span className="subtle" style={{ fontSize: "0.75rem" }}>
+                  {eventStreamStatus}
+                </span>
+              </header>
+              <div className="event-feed">
+                {!runEvents.length ? (
+                  <p className="subtle" style={{ padding: 10 }}>
+                    No events captured.
+                  </p>
+                ) : (
+                  runEvents.map((event) => (
+                    <article key={event.id} className="event-row">
+                      <div className="event-row-head">
+                        <span
+                          className="status-chip tiny"
+                          style={{ background: "rgba(255,255,255,0.1)" }}
+                        >
+                          {event.type}
+                        </span>
+                        <span
+                          className="subtle mono"
+                          style={{ fontSize: "0.7rem" }}
+                        >
+                          {event.taskId}
+                        </span>
+                      </div>
+                      <p className="subtle" style={{ margin: 0 }}>
+                        {event.detail}
+                      </p>
+                    </article>
+                  ))
+                )}
+              </div>
+            </section>
+
+            <aside className="task-drawer">
+              <header>
+                <h3 className="eyebrow" style={{ marginBottom: 4 }}>
+                  Task Details
+                </h3>
+                <p className="subtle mono" style={{ fontSize: "0.75rem" }}>
+                  {selectedTaskId || "Select a task"}
+                </p>
+              </header>
+
+              {selectedTask ? (
+                <>
+                  <article className="task-meta-card">
+                    <h4 style={{ margin: "0 0 8px" }}>{selectedTask.title}</h4>
+                    <p
+                      className="subtle"
+                      style={{ fontSize: "0.8rem", marginBottom: 12 }}
+                    >
+                      {selectedTask.objective || "No objective defined."}
+                    </p>
+                    <div className="status-counter-row compact">
                       <span
-                        className={`status-chip tiny ${event.status || "pending"}`}
+                        className={`status-chip tiny ${selectedTask.status}`}
                       >
-                        {event.status || "info"}
+                        {selectedTask.status}
+                      </span>
+                      <span className="status-chip tiny">
+                        P: {selectedTask.priority ?? "n/a"}
                       </span>
                     </div>
-                    <p className="subtle">{event.detail}</p>
                   </article>
-                ))
-              )}
-            </div>
-          </section>
 
-          <aside className="task-drawer">
-            <header>
-              <h3>Task Details</h3>
-              <p className="subtle mono">{selectedTaskId || "none"}</p>
-            </header>
-
-            {selectedTask ? (
-              <>
-                <article className="task-meta-card">
-                  <h4>{selectedTask.title}</h4>
-                  <p className="subtle">
-                    {selectedTask.objective || "No objective provided."}
-                  </p>
-                  <div className="status-counter-row compact">
-                    <span className={`status-chip ${selectedTask.status}`}>
-                      {selectedTask.status}
-                    </span>
-                    <span className="status-chip pending">
-                      priority: {selectedTask.priority ?? "n/a"}
-                    </span>
+                  <div className="button-row">
+                    <button
+                      className="btn small"
+                      disabled={taskActionBusy}
+                      onClick={() =>
+                        taskControlAction(selectedTask.taskId, "pause")
+                      }
+                    >
+                      Pause
+                    </button>
+                    <button
+                      className="btn small"
+                      disabled={taskActionBusy}
+                      onClick={() =>
+                        taskControlAction(selectedTask.taskId, "resume")
+                      }
+                    >
+                      Resume
+                    </button>
+                    <button
+                      className="btn small danger"
+                      disabled={taskActionBusy}
+                      onClick={() =>
+                        taskControlAction(selectedTask.taskId, "stop")
+                      }
+                    >
+                      Stop
+                    </button>
                   </div>
-                </article>
 
-                <div className="button-row">
-                  <button
-                    className="btn small"
-                    disabled={taskActionBusy}
-                    onClick={() =>
-                      taskControlAction(selectedTask.taskId, "pause")
-                    }
+                  <div
+                    className="glass-panel"
+                    style={{ padding: 10, background: "rgba(0,0,0,0.2)" }}
                   >
-                    Pause
-                  </button>
-                  <button
-                    className="btn small"
-                    disabled={taskActionBusy}
-                    onClick={() =>
-                      taskControlAction(selectedTask.taskId, "resume")
-                    }
-                  >
-                    Resume
-                  </button>
-                  <button
-                    className="btn small accent"
-                    disabled={taskActionBusy}
-                    onClick={() =>
-                      taskControlAction(selectedTask.taskId, "stop")
-                    }
-                  >
-                    Stop
-                  </button>
+                    <label
+                      className="eyebrow"
+                      style={{ display: "block", marginBottom: 4 }}
+                    >
+                      Steering
+                    </label>
+                    <textarea
+                      value={steerForm.comment}
+                      onChange={(e) =>
+                        setSteerForm((p) => ({ ...p, comment: e.target.value }))
+                      }
+                      placeholder="Feedback or constraint..."
+                      style={{ marginBottom: 8, fontSize: "0.85rem" }}
+                    />
+                    <input
+                      value={steerForm.promptPatch}
+                      onChange={(e) =>
+                        setSteerForm((p) => ({
+                          ...p,
+                          promptPatch: e.target.value,
+                        }))
+                      }
+                      placeholder="Prompt patch..."
+                      style={{ marginBottom: 8, fontSize: "0.85rem" }}
+                    />
+                    <button
+                      className="btn primary small w-full"
+                      style={{ width: "100%", justifyContent: "center" }}
+                      disabled={taskActionBusy || !steerForm.comment.trim()}
+                      onClick={() =>
+                        taskControlAction(selectedTask.taskId, "steer", {
+                          comment: steerForm.comment.trim(),
+                          prompt_patch: steerForm.promptPatch.trim(),
+                        })
+                      }
+                    >
+                      {taskActionBusy ? "Sending..." : "Send Steering"}
+                    </button>
+                  </div>
+
+                  <div className="drawer-tabs">
+                    <button
+                      className={`tab-btn ${drawerTab === "logs" ? "active" : ""}`}
+                      onClick={() => setDrawerTab("logs")}
+                    >
+                      Logs
+                    </button>
+                    <button
+                      className={`tab-btn ${drawerTab === "artifacts" ? "active" : ""}`}
+                      onClick={() => setDrawerTab("artifacts")}
+                    >
+                      Artifacts
+                    </button>
+                  </div>
+
+                  <div style={{ flex: 1, minHeight: 0, overflowY: "auto" }}>
+                    {drawerTab === "logs" ? (
+                      <pre className="drawer-pre">{logText}</pre>
+                    ) : (
+                      <div className="artifact-list">
+                        <div className="flex-between" style={{ padding: 8 }}>
+                          <button
+                            className="btn small ghost"
+                            onClick={() =>
+                              loadTaskArtifacts(selectedTask.taskId, true)
+                            }
+                          >
+                            Refresh
+                          </button>
+                        </div>
+                        {!selectedArtifacts.length ? (
+                          <p className="subtle" style={{ textAlign: "center" }}>
+                            No artifacts.
+                          </p>
+                        ) : (
+                          selectedArtifacts.map((item, idx) => (
+                            <article
+                              key={item.id || idx}
+                              className="artifact-row"
+                            >
+                              <div className="artifact-top">
+                                <strong>{item.kind}</strong>
+                                <span className="mono subtle">
+                                  {item.path || item.name}
+                                </span>
+                              </div>
+                              {item.content && (
+                                <pre
+                                  className="drawer-pre"
+                                  style={{ maxHeight: 150 }}
+                                >
+                                  {String(item.content)}
+                                </pre>
+                              )}
+                            </article>
+                          ))
+                        )}
+                      </div>
+                    )}
+                  </div>
+                </>
+              ) : (
+                <div
+                  className="flex-center"
+                  style={{ height: "200px", opacity: 0.5 }}
+                >
+                  <p>Select a task node.</p>
                 </div>
+              )}
+            </aside>
+          </div>
+        </section>
 
+        <section
+          className="layout"
+          style={{ flex: "none", overflow: "visible", minHeight: "auto" }}
+        >
+          <div className="flex-col" style={{ gap: 24 }}>
+            {/* Prompt Agent Panel */}
+            <article className="glass-panel panel">
+              <div className="flex-between">
+                <h2>Prompt Agent</h2>
+                <span className="subtle">Automated Ops</span>
+              </div>
+              <p className="subtle">
+                Kickoff worlds, run codex/tests, and verify result with one
+                prompt.
+              </p>
+
+              <textarea
+                value={autopilot.prompt}
+                onChange={(e) =>
+                  setAutopilot((s) => ({ ...s, prompt: e.target.value }))
+                }
+                placeholder="Example: Fix flaky checkout timeout along with regression tests."
+                style={{ minHeight: 80 }}
+              />
+
+              <div className="grid two">
                 <label>
-                  Steering comment
-                  <textarea
-                    value={steerForm.comment}
+                  <span className="eyebrow">Count</span>
+                  <input
+                    value={autopilot.count}
                     onChange={(e) =>
-                      setSteerForm((prev) => ({
-                        ...prev,
-                        comment: e.target.value,
-                      }))
+                      setAutopilot((s) => ({ ...s, count: e.target.value }))
                     }
-                    placeholder="Focus on deterministic retry behavior and include regression test coverage."
                   />
                 </label>
                 <label>
-                  Prompt patch (optional)
-                  <textarea
-                    value={steerForm.promptPatch}
+                  <span className="eyebrow">Base Ref</span>
+                  <input
+                    value={autopilot.fromRef}
                     onChange={(e) =>
-                      setSteerForm((prev) => ({
-                        ...prev,
-                        promptPatch: e.target.value,
-                      }))
+                      setAutopilot((s) => ({ ...s, fromRef: e.target.value }))
                     }
-                    placeholder="Append: prioritize minimal diff and preserve public API compatibility."
+                    placeholder="main"
                   />
                 </label>
+              </div>
+
+              <label>
+                <span className="eyebrow">Strategies (name::notes)</span>
+                <textarea
+                  value={autopilot.strategies}
+                  onChange={(e) =>
+                    setAutopilot((s) => ({ ...s, strategies: e.target.value }))
+                  }
+                  placeholder="surgical-fix::minimal changes"
+                  style={{ minHeight: 60 }}
+                />
+              </label>
+
+              <div className="grid checks">
+                <label className="check">
+                  <input
+                    type="checkbox"
+                    checked={autopilot.run}
+                    onChange={(e) =>
+                      setAutopilot((s) => ({ ...s, run: e.target.checked }))
+                    }
+                  />
+                  Run
+                </label>
+                <label className="check">
+                  <input
+                    type="checkbox"
+                    checked={autopilot.play}
+                    onChange={(e) =>
+                      setAutopilot((s) => ({ ...s, play: e.target.checked }))
+                    }
+                  />
+                  Play
+                </label>
+                <label className="check">
+                  <input
+                    type="checkbox"
+                    checked={autopilot.skipCodex}
+                    onChange={(e) =>
+                      setAutopilot((s) => ({
+                        ...s,
+                        skipCodex: e.target.checked,
+                      }))
+                    }
+                  />
+                  Skip Codex
+                </label>
+              </div>
+
+              <button
+                className="btn primary"
+                disabled={busy || !autopilot.prompt.trim()}
+                onClick={() =>
+                  postAction(
+                    "autopilot",
+                    {
+                      prompt: autopilot.prompt.trim(),
+                      count: asInt(autopilot.count),
+                      from_ref: autopilot.fromRef.trim() || null,
+                      strategies: parseStrategies(autopilot.strategies),
+                      run: autopilot.run,
+                      play: autopilot.play,
+                      skip_codex: autopilot.skipCodex,
+                      skip_runner: autopilot.skipRunner,
+                    },
+                    { switchToLatest: true },
+                  )
+                }
+              >
+                {busy ? "Running..." : "Run Prompt"}
+              </button>
+            </article>
+
+            {/* World Blocks */}
+            <section className="glass-panel panel">
+              <div className="worlds-header">
+                <h2>World Blocks</h2>
+                <p className="subtle">Active development branches.</p>
+              </div>
+
+              {!worldRows.length ? (
+                <p className="subtle">
+                  No worlds found. Start a new prompt or kickoff.
+                </p>
+              ) : (
+                <div
+                  className="grid"
+                  style={{
+                    gridTemplateColumns:
+                      "repeat(auto-fill, minmax(300px, 1fr))",
+                  }}
+                >
+                  {worldRows.map(({ world, run, codex, render }) => (
+                    <article
+                      key={world.id}
+                      className="glass-panel"
+                      style={{ padding: 16, border: "1px solid var(--line)" }}
+                    >
+                      <div className="flex-between" style={{ marginBottom: 8 }}>
+                        <h3 style={{ fontSize: "1rem" }}>
+                          {world.index}. {world.name}
+                        </h3>
+                        <span
+                          className={`status-chip tiny ${statusTone(world.status)}`}
+                        >
+                          {world.status}
+                        </span>
+                      </div>
+                      <code
+                        className="mono subtle"
+                        style={{
+                          display: "block",
+                          marginBottom: 8,
+                          fontSize: "0.8rem",
+                        }}
+                      >
+                        {world.branch}
+                      </code>
+                      <p
+                        className="subtle"
+                        style={{ fontSize: "0.85rem", marginBottom: 12 }}
+                      >
+                        {world.notes}
+                      </p>
+
+                      <div
+                        className="metrics grid two"
+                        style={{ gap: 4, marginBottom: 12, fontSize: "0.8rem" }}
+                      >
+                        <span>Codex: {codex?.exit_code ?? "-"}</span>
+                        <span>Run: {run?.exit_code ?? "-"}</span>
+                        <span>Render: {render?.exit_code ?? "-"}</span>
+                        <span>Time: {fmtDuration(run?.duration_sec)}</span>
+                      </div>
+
+                      <div className="button-row">
+                        <button
+                          className="btn small"
+                          onClick={() =>
+                            postAction("run", {
+                              branchpoint: selectedBranchpoint || "",
+                              worlds: world.id,
+                            })
+                          }
+                        >
+                          Run
+                        </button>
+                        <button
+                          className="btn small"
+                          onClick={() =>
+                            postAction("play", {
+                              branchpoint: selectedBranchpoint || "",
+                              worlds: world.id,
+                            })
+                          }
+                        >
+                          Play
+                        </button>
+                        <button
+                          className="btn small accent"
+                          onClick={() => forkFromWorld(world)}
+                        >
+                          Fork
+                        </button>
+                      </div>
+
+                      <div
+                        className="flex-center"
+                        style={{ gap: 8, marginTop: 8 }}
+                      >
+                        <button
+                          className="btn ghost small"
+                          onClick={() => openLog("codex", world.id)}
+                        >
+                          Codex Log
+                        </button>
+                        <button
+                          className="btn ghost small"
+                          onClick={() => openLog("run", world.id)}
+                        >
+                          Run Log
+                        </button>
+                      </div>
+                    </article>
+                  ))}
+                </div>
+              )}
+            </section>
+          </div>
+
+          {/* Sidebar Controls */}
+          <aside className="flex-col" style={{ gap: 24 }}>
+            <article className="glass-panel panel">
+              <h2>Branchpoint</h2>
+              <label>
+                <span className="eyebrow">Select</span>
+                <select
+                  value={selectedBranchpoint}
+                  onChange={(e) => loadDashboard(e.target.value, false)}
+                >
+                  <option value="">Latest</option>
+                  {branchpoints.map((bp) => (
+                    <option key={bp.id} value={bp.id}>
+                      {bp.id} ({bp.status})
+                    </option>
+                  ))}
+                </select>
+              </label>
+
+              <h3 style={{ marginTop: 16, fontSize: "1rem" }}>
+                Manual Kickoff
+              </h3>
+              <label>
+                <span className="eyebrow">Intent</span>
+                <textarea
+                  value={kickoff.intent}
+                  onChange={(e) =>
+                    setKickoff((s) => ({ ...s, intent: e.target.value }))
+                  }
+                  placeholder="Describe task..."
+                />
+              </label>
+              <button
+                className="btn"
+                disabled={busy || !kickoff.intent.trim()}
+                onClick={() =>
+                  postAction(
+                    "kickoff",
+                    {
+                      intent: kickoff.intent.trim(),
+                      count: asInt(kickoff.count),
+                      from_ref: kickoff.fromRef.trim() || null,
+                      strategies: parseStrategies(kickoff.strategies),
+                    },
+                    { switchToLatest: true },
+                  )
+                }
+              >
+                Kickoff
+              </button>
+            </article>
+
+            <article className="glass-panel panel">
+              <h2>Batch Controls</h2>
+              <label>
+                <span className="eyebrow">Target Worlds</span>
+                <input
+                  value={runForm.worlds}
+                  onChange={(e) =>
+                    setRunForm((s) => ({ ...s, worlds: e.target.value }))
+                  }
+                  placeholder="e.g. 1, 3"
+                />
+              </label>
+              <div className="button-row">
                 <button
-                  className="btn primary"
-                  disabled={taskActionBusy || !steerForm.comment.trim()}
+                  className="btn"
                   onClick={() =>
-                    taskControlAction(selectedTask.taskId, "steer", {
-                      comment: steerForm.comment.trim(),
-                      prompt_patch: steerForm.promptPatch.trim(),
+                    postAction("run", {
+                      branchpoint: selectedBranchpoint || "",
+                      worlds: runForm.worlds,
+                      skip_codex: runForm.skipCodex,
+                      skip_runner: runForm.skipRunner,
                     })
                   }
                 >
-                  {taskActionBusy ? "Submitting..." : "Send Steering"}
+                  Run Batch
                 </button>
-
-                <div className="drawer-tabs">
-                  <button
-                    className={`tab-btn ${drawerTab === "logs" ? "active" : ""}`}
-                    onClick={() => setDrawerTab("logs")}
-                  >
-                    Logs
-                  </button>
-                  <button
-                    className={`tab-btn ${drawerTab === "artifacts" ? "active" : ""}`}
-                    onClick={() => setDrawerTab("artifacts")}
-                  >
-                    Artifacts
-                  </button>
-                </div>
-
-                {drawerTab === "logs" ? (
-                  <pre className="drawer-pre">{logText}</pre>
-                ) : (
-                  <div className="artifact-list">
-                    <div className="artifact-actions">
-                      <button
-                        className="btn small"
-                        disabled={taskArtifactsLoading}
-                        onClick={() =>
-                          loadTaskArtifacts(selectedTask.taskId, true)
-                        }
-                      >
-                        {taskArtifactsLoading
-                          ? "Refreshing..."
-                          : "Refresh Artifacts"}
-                      </button>
-                    </div>
-                    {selectedArtifacts.length === 0 ? (
-                      <p className="subtle">No artifacts yet.</p>
-                    ) : (
-                      selectedArtifacts.map((item, idx) => (
-                        <article
-                          key={item.id || `artifact-${idx}`}
-                          className="artifact-row"
-                        >
-                          <div className="artifact-top">
-                            <strong>{item.kind || "artifact"}</strong>
-                            <span className="subtle mono">
-                              {item.path || item.name || "inline"}
-                            </span>
-                          </div>
-                          {item.message ? (
-                            <p className="subtle">{item.message}</p>
-                          ) : null}
-                          {item.content ? (
-                            <pre className="drawer-pre">
-                              {String(item.content)}
-                            </pre>
-                          ) : null}
-                        </article>
-                      ))
-                    )}
-                  </div>
-                )}
-              </>
-            ) : (
-              <p className="subtle">
-                Select a DAG node to inspect logs, artifacts, and controls.
-              </p>
-            )}
-          </aside>
-        </div>
-      </section>
-
-      <section className="layout">
-        <article className="glass panel">
-          <h2>Prompt Agent</h2>
-          <p className="subtle">
-            One prompt can kickoff worlds, run codex/test execution, and
-            optionally play render workflows.
-          </p>
-          <label>
-            Prompt
-            <textarea
-              value={autopilot.prompt}
-              onChange={(e) =>
-                setAutopilot((s) => ({ ...s, prompt: e.target.value }))
-              }
-              placeholder="Fix flaky checkout timeout and improve reliability."
-            />
-          </label>
-          <div className="grid two">
-            <label>
-              World count
-              <input
-                value={autopilot.count}
-                onChange={(e) =>
-                  setAutopilot((s) => ({ ...s, count: e.target.value }))
-                }
-                placeholder="3"
-              />
-            </label>
-            <label>
-              From ref (optional)
-              <input
-                value={autopilot.fromRef}
-                onChange={(e) =>
-                  setAutopilot((s) => ({ ...s, fromRef: e.target.value }))
-                }
-                placeholder="main"
-              />
-            </label>
-          </div>
-          <label>
-            Strategies (optional, one per line: <code>name::notes</code>)
-            <textarea
-              value={autopilot.strategies}
-              onChange={(e) =>
-                setAutopilot((s) => ({ ...s, strategies: e.target.value }))
-              }
-              placeholder={
-                "surgical-fix::minimal patch\nfix-plus-tests::add regression tests"
-              }
-            />
-          </label>
-          <div className="grid checks">
-            <label className="check">
-              <input
-                type="checkbox"
-                checked={autopilot.run}
-                onChange={(e) =>
-                  setAutopilot((s) => ({ ...s, run: e.target.checked }))
-                }
-              />
-              Run after kickoff
-            </label>
-            <label className="check">
-              <input
-                type="checkbox"
-                checked={autopilot.play}
-                onChange={(e) =>
-                  setAutopilot((s) => ({ ...s, play: e.target.checked }))
-                }
-              />
-              Play after run
-            </label>
-            <label className="check">
-              <input
-                type="checkbox"
-                checked={autopilot.skipCodex}
-                onChange={(e) =>
-                  setAutopilot((s) => ({ ...s, skipCodex: e.target.checked }))
-                }
-              />
-              Skip codex
-            </label>
-            <label className="check">
-              <input
-                type="checkbox"
-                checked={autopilot.skipRunner}
-                onChange={(e) =>
-                  setAutopilot((s) => ({ ...s, skipRunner: e.target.checked }))
-                }
-              />
-              Skip runner
-            </label>
-          </div>
-          <button
-            className="btn primary"
-            disabled={busy || !autopilot.prompt.trim()}
-            onClick={() =>
-              postAction(
-                "autopilot",
-                {
-                  prompt: autopilot.prompt.trim(),
-                  count: asInt(autopilot.count),
-                  from_ref: autopilot.fromRef.trim() || null,
-                  strategies: parseStrategies(autopilot.strategies),
-                  run: autopilot.run,
-                  play: autopilot.play,
-                  skip_codex: autopilot.skipCodex,
-                  skip_runner: autopilot.skipRunner,
-                },
-                { switchToLatest: true },
-              )
-            }
-          >
-            {busy ? "Running..." : "Run Prompt"}
-          </button>
-        </article>
-
-        <article className="glass panel">
-          <h2>Branchpoint Controls</h2>
-          <label>
-            Branchpoint
-            <select
-              value={selectedBranchpoint}
-              onChange={(e) => loadDashboard(e.target.value, false)}
-            >
-              <option value="">Latest</option>
-              {branchpoints.map((bp) => (
-                <option key={bp.id} value={bp.id}>
-                  {bp.id} ({bp.status || "created"})
-                </option>
-              ))}
-            </select>
-          </label>
-
-          <h3>Kickoff</h3>
-          <label>
-            Intent
-            <textarea
-              value={kickoff.intent}
-              onChange={(e) =>
-                setKickoff((s) => ({ ...s, intent: e.target.value }))
-              }
-              placeholder="Refactor auth module to reduce branch complexity."
-            />
-          </label>
-          <div className="grid two">
-            <label>
-              Count
-              <input
-                value={kickoff.count}
-                onChange={(e) =>
-                  setKickoff((s) => ({ ...s, count: e.target.value }))
-                }
-              />
-            </label>
-            <label>
-              From ref
-              <input
-                value={kickoff.fromRef}
-                onChange={(e) =>
-                  setKickoff((s) => ({ ...s, fromRef: e.target.value }))
-                }
-                placeholder="main"
-              />
-            </label>
-          </div>
-          <label>
-            Strategies (optional)
-            <textarea
-              value={kickoff.strategies}
-              onChange={(e) =>
-                setKickoff((s) => ({ ...s, strategies: e.target.value }))
-              }
-              placeholder="thin-refactor::extract boundaries"
-            />
-          </label>
-          <button
-            className="btn"
-            disabled={busy || !kickoff.intent.trim()}
-            onClick={() =>
-              postAction(
-                "kickoff",
-                {
-                  intent: kickoff.intent.trim(),
-                  count: asInt(kickoff.count),
-                  from_ref: kickoff.fromRef.trim() || null,
-                  strategies: parseStrategies(kickoff.strategies),
-                },
-                { switchToLatest: true },
-              )
-            }
-          >
-            Create Worlds
-          </button>
-
-          <h3>Run / Play</h3>
-          <label>
-            World filter(s), comma or space separated
-            <input
-              value={runForm.worlds}
-              onChange={(e) =>
-                setRunForm((s) => ({ ...s, worlds: e.target.value }))
-              }
-            />
-          </label>
-          <div className="grid checks">
-            <label className="check">
-              <input
-                type="checkbox"
-                checked={runForm.skipCodex}
-                onChange={(e) =>
-                  setRunForm((s) => ({ ...s, skipCodex: e.target.checked }))
-                }
-              />
-              Skip codex
-            </label>
-            <label className="check">
-              <input
-                type="checkbox"
-                checked={runForm.skipRunner}
-                onChange={(e) =>
-                  setRunForm((s) => ({ ...s, skipRunner: e.target.checked }))
-                }
-              />
-              Skip runner
-            </label>
-            <button
-              className="btn"
-              disabled={busy}
-              onClick={() =>
-                postAction("run", {
-                  branchpoint: selectedBranchpoint || "",
-                  worlds: runForm.worlds,
-                  skip_codex: runForm.skipCodex,
-                  skip_runner: runForm.skipRunner,
-                })
-              }
-            >
-              Run Branchpoint
-            </button>
-            <button
-              className="btn"
-              disabled={busy}
-              onClick={() =>
-                postAction("play", {
-                  branchpoint: selectedBranchpoint || "",
-                  worlds: playForm.worlds || runForm.worlds,
-                  render_command: playForm.renderCommand.trim() || null,
-                  timeout: asInt(playForm.timeout),
-                  preview_lines: asInt(playForm.previewLines),
-                })
-              }
-            >
-              Play Branchpoint
-            </button>
-          </div>
-          <div className="grid two">
-            <label>
-              Play worlds
-              <input
-                value={playForm.worlds}
-                onChange={(e) =>
-                  setPlayForm((s) => ({ ...s, worlds: e.target.value }))
-                }
-              />
-            </label>
-            <label>
-              Render timeout
-              <input
-                value={playForm.timeout}
-                onChange={(e) =>
-                  setPlayForm((s) => ({ ...s, timeout: e.target.value }))
-                }
-                placeholder="180"
-              />
-            </label>
-          </div>
-          <label>
-            Render command override
-            <input
-              value={playForm.renderCommand}
-              onChange={(e) =>
-                setPlayForm((s) => ({ ...s, renderCommand: e.target.value }))
-              }
-              placeholder="npm run dev:smoke"
-            />
-          </label>
-          <label>
-            Preview lines
-            <input
-              value={playForm.previewLines}
-              onChange={(e) =>
-                setPlayForm((s) => ({ ...s, previewLines: e.target.value }))
-              }
-              placeholder="25"
-            />
-          </label>
-        </article>
-      </section>
-
-      <section className="glass dag-panel">
-        <div className="dag-header">
-          <h2>Branchpoint DAG</h2>
-          <p className="subtle">Global lineage from main/source refs plus live branch heads for the selected branchpoint.</p>
-        </div>
-        <div className="dag-subsection">
-          <h3>All Branchpoints</h3>
-          <p className="subtle">Shows every branchpoint path starting from its source ref (for example, main).</p>
-          {branchpointLineage.rows.length === 0 ? (
-            <p className="subtle">No branchpoints found yet.</p>
-          ) : (
-            <div className="dag-tree">
-              {branchpointLineage.rows.map((row) =>
-                row.type === "source" ? (
-                  <div key={row.key} className="dag-tree-source" style={{ "--depth": row.depth }}>
-                    <span className="dag-dot root" />
-                    <div>
-                      <p className="dag-node-title">source</p>
-                      <p className="dag-node-meta mono">{row.sourceRef}</p>
-                    </div>
-                  </div>
-                ) : (
-                  <article key={row.key} className={`dag-tree-branchpoint tone-${statusTone(row.branchpoint.status)}`} style={{ "--depth": row.depth }}>
-                    <span className="dag-link" />
-                    <div className="dag-branch-head">
-                      <span className={`status ${statusTone(row.branchpoint.status)}`}>{row.branchpoint.status}</span>
-                      <strong>{row.branchpoint.id}</strong>
-                    </div>
-                    <p className="dag-node-meta mono">
-                      from {row.branchpoint.sourceRef || row.branchpoint.baseBranch || "main"} | worlds {row.worlds.length}
-                    </p>
-                    {row.worlds.length > 0 ? (
-                      <div className="dag-tree-worlds">
-                        {row.worlds.map((world) => (
-                          <span key={`dag-world-${row.branchpoint.id}-${world.id}`} className={`dag-world-pill tone-${statusTone(world.status)}`}>
-                            {world.name}
-                          </span>
-                        ))}
-                      </div>
-                    ) : null}
-                  </article>
-                ),
-              )}
-            </div>
-          )}
-          <p className="subtle">Total branchpoints: {branchpointLineage.total}</p>
-        </div>
-
-        <div className="dag-subsection">
-          <h3>Selected Branchpoint Branch Heads</h3>
-          <div className="dag-root-node">
-            <span className="dag-dot root" />
-            <div>
-              <p className="dag-node-title">source</p>
-              <p className="dag-node-meta mono">
-                {branchpoint?.source_ref || "main"} ({branchpoint?.base_branch || "base"})
-              </p>
-            </div>
-          </div>
-          {dagRows.length === 0 ? (
-            <p className="subtle">No world branches yet for this branchpoint.</p>
-          ) : (
-            <div className="dag-branches">
-              {dagRows.map((item) => (
-                <article key={`dag-${item.id || item.branch}`} className={`dag-branch tone-${statusTone(item.status)}`}>
-                  <span className="dag-link" />
-                  <div className="dag-branch-head">
-                    <span className={`status ${statusTone(item.status)}`}>{item.status}</span>
-                    <strong>{item.name}</strong>
-                  </div>
-                  <p className="mono">{item.branch}</p>
-                  <p className="dag-node-meta">HEAD {item.head} | commits {item.commits} | dirty {item.dirty}</p>
-                </article>
-              ))}
-            </div>
-          )}
-        </div>
-      </section>
-
-      <section className="glass worlds-panel">
-        <div className="worlds-header">
-          <h2>World Blocks</h2>
-          <p className="subtle">
-            Click <strong>Fork</strong> on any block to split a new branchpoint
-            from that world branch.
-          </p>
-        </div>
-        {worldRows.length === 0 ? (
-          <p className="subtle">
-            No worlds yet. Create one with Kickoff or Prompt Agent.
-          </p>
-        ) : (
-          <div className="world-grid">
-            {worldRows.map((row) => {
-              const world = row.world;
-              const run = row.run;
-              const codex = row.codex;
-              const render = row.render;
-              return (
-                <article
-                  key={world.id}
-                  className={`world-card tone-${statusTone(world.status)}`}
+                <button
+                  className="btn"
+                  onClick={() =>
+                    postAction("play", {
+                      branchpoint: selectedBranchpoint || "",
+                      worlds: playForm.worlds || runForm.worlds,
+                      render_command: playForm.renderCommand.trim() || null,
+                      timeout: asInt(playForm.timeout),
+                      preview_lines: asInt(playForm.previewLines),
+                    })
+                  }
                 >
-                  <div className="world-head">
-                    <h3>
-                      {String(world.index).padStart(2, "0")} {world.name}
-                    </h3>
-                    <span className={`status ${statusTone(world.status)}`}>
-                      {world.status || "ready"}
-                    </span>
-                  </div>
-                  <p className="mono">{world.branch}</p>
-                  <p className="subtle">
-                    {world.notes || "No strategy notes."}
-                  </p>
-                  <div className="metrics">
-                    <span>
-                      Codex: {codex ? codex.exit_code ?? "n/a" : "n/a"}
-                    </span>
-                    <span>Run: {run ? run.exit_code ?? "n/a" : "n/a"}</span>
-                    <span>
-                      Render: {render ? render.exit_code ?? "n/a" : "n/a"}
-                    </span>
-                    <span>Run time: {fmtDuration(run?.duration_sec)}</span>
-                  </div>
-                  <div className="button-row">
-                    <button
-                      className="btn small"
-                      disabled={busy}
-                      onClick={() =>
-                        postAction("run", {
-                          branchpoint: selectedBranchpoint || "",
-                          worlds: world.id,
-                        })
-                      }
-                    >
-                      Run
-                    </button>
-                    <button
-                      className="btn small"
-                      disabled={busy}
-                      onClick={() =>
-                        postAction("play", {
-                          branchpoint: selectedBranchpoint || "",
-                          worlds: world.id,
-                        })
-                      }
-                    >
-                      Play
-                    </button>
-                    <button
-                      className="btn small"
-                      disabled={busy}
-                      onClick={() =>
-                        postAction("select", {
-                          branchpoint: selectedBranchpoint || "",
-                          world: world.id,
-                          merge: false,
-                        })
-                      }
-                    >
-                      Select
-                    </button>
-                    <button
-                      className="btn small accent"
-                      disabled={busy}
-                      onClick={() => forkFromWorld(world)}
-                    >
-                      Fork
-                    </button>
-                  </div>
-                  <div className="button-row">
-                    <button
-                      className="link-btn"
-                      onClick={() => openLog("codex", world.id)}
-                    >
-                      Codex log
-                    </button>
-                    <button
-                      className="link-btn"
-                      onClick={() => openLog("run", world.id)}
-                    >
-                      Run log
-                    </button>
-                    <button
-                      className="link-btn"
-                      onClick={() => openLog("render", world.id)}
-                    >
-                      Render log
-                    </button>
-                  </div>
-                </article>
-              );
-            })}
-          </div>
-        )}
-      </section>
+                  Play Batch
+                </button>
+              </div>
+            </article>
 
-      <section className="layout logs">
-        <article className="glass panel">
-          <h2>
-            Artifact: <code>{artifactName}</code>
-          </h2>
-          <pre>{artifactText || "No artifact loaded yet."}</pre>
-        </article>
-        <article className="glass panel">
-          <h2>
-            Log:{" "}
-            {logState.kind ? (
-              <code>
-                {logState.kind} / {logState.world}
-              </code>
-            ) : (
-              "none"
-            )}
-          </h2>
-          <p className="subtle mono">{logState.path || ""}</p>
-          <pre>
-            {logState.loading
-              ? "Loading log..."
-              : logState.text || "Select a log from a world block."}
-          </pre>
-        </article>
-      </section>
+            <article
+              className="glass-panel panel"
+              style={{
+                flex: 1,
+                minHeight: 0,
+                overflow: "hidden",
+                display: "flex",
+                flexDirection: "column",
+              }}
+            >
+              <h2>Viewer</h2>
+              <div className="drawer-tabs">
+                <span className={`tab-btn active`}>{artifactName}</span>
+              </div>
+              <pre className="drawer-pre" style={{ flex: 1 }}>
+                {artifactText || "No artifact loaded."}
+              </pre>
+            </article>
+          </aside>
+        </section>
+      </div>
     </main>
   );
 }
